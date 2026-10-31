@@ -1,0 +1,10 @@
+{
+  "version": "0.2.1",
+  "tasks": [
+    {
+      "taskLabel": "task-MultiProbe_1.3",
+      "appliesTo": "Debug/MultiProbe_1.3.elf",
+      "type": "launch"
+    }
+  ]
+}
