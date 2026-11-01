@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-MultiProbe - convert a GIF/MP4 and upload it to the board's W25Q64 flash over UART4.
+MultiProbe - convert a GIF/MP4 and upload it to the board's W25Q64 flash.
+Works over USB (the board shows up as a virtual COM port) or over UART4.
 
 Requirements (PC):
     pip install pyserial
     ffmpeg in PATH (https://ffmpeg.org)
 
-Wiring: USB-serial adapter (3.3 V logic!) -> board "UART" header:
-    adapter RX <- PA0 (UART4_TX),  adapter TX -> PA1 (UART4_RX),  GND <-> GND
+USB: plug the board's USB header (DP/DM/GND) into the PC. Windows 10/11 creates a COM port
+     by itself ("USB Serial Device", see Device Manager -> Ports). No driver to install.
+UART (old way): USB-serial adapter (3.3 V logic!) -> adapter RX <- PA0, adapter TX -> PA1, GND.
 
 Usage:
     python video_upload.py cat.mp4 COM5                 # convert + upload (120x120, drawn 2x = fullscreen)
     python video_upload.py cat.mp4 COM5 --size 160      # 160x160, drawn 1x, centered on the screen
     python video_upload.py cat.mp4 --no-upload          # only check that it fits, write video.bin
 
-Then START THE BOARD (or reset it) while the script says "waiting for the board".
-The board listens for about 3 seconds after boot (logo on screen).
+USB: start the script, then plug in / power the board (or reset it). The script waits for the COM
+port to appear, and also works while the board is already playing a clip (no reset needed).
+UART: reset the board while the script says "waiting for the board" (about 1 s window after boot).
 """
 
 import argparse
@@ -74,10 +77,28 @@ def read_until(ser, wanted, timeout):
     return None
 
 
-def upload(port, baud, header, data, wait_s):
+def open_port(port, baud, wait_s):
+    """Open the serial port; with USB the COM port only exists while the board is plugged in."""
     import serial   # imported here so --no-upload works without pyserial
 
-    ser = serial.Serial(port, baud, timeout=0.05, write_timeout=5)
+    end = time.time() + wait_s
+    announced = False
+    while True:
+        try:
+            return serial.Serial(port, baud, timeout=0.05, write_timeout=5)
+        except serial.SerialException:
+            if time.time() > end:
+                sys.exit(f"{port} did not appear / cannot be opened. Is the board plugged in? "
+                         f"Is another program (terminal, IDE) using the port?")
+            if not announced:
+                print(f"Waiting for {port} to appear ({wait_s:.0f} s) - plug in / power the board ...")
+                announced = True
+            time.sleep(0.2)
+
+
+def upload(port, baud, header, data, wait_s):
+    ser = open_port(port, baud, wait_s)
+    ser.reset_input_buffer()
     print(f"Waiting for the board on {port} ({wait_s:.0f} s) - start / reset the board now ...")
 
     end = time.time() + wait_s
@@ -124,12 +145,17 @@ def upload(port, baud, header, data, wait_s):
             print(f"\r  {i + 1}/{blocks} blocks  {pct:5.1f} %", end="", flush=True)
 
     print()
-    r = read_until(ser, b"DF", 15)        # the board verifies the whole flash CRC now
+    print("Board is reading the clip back from its flash to verify it (a few seconds per MB) ...")
+    r = read_until(ser, b"DF", 180)       # the board verifies the whole flash CRC now
     ser.close()
     if r == b"D":
         print(f"Done in {time.time() - t0:.0f} s. The board shows green and then plays the clip.")
+    elif r == b"F":
+        sys.exit("The board read the clip back and the CRC does NOT match (red screen): "
+                 "some data in the flash is wrong. Try again.")
     else:
-        sys.exit("Upload finished but the board's CRC check failed (red screen). Try again.")
+        sys.exit("The board sent no answer after the last block (timeout). "
+                 "Look at the LCD: green/video = it actually worked.")
 
 
 def main():
