@@ -106,6 +106,7 @@
 //
 //    while ((HAL_GetTick() - t0) < window_ms)
 //    {
+//        __HAL_UART_CLEAR_FLAG(&huart4, UART_CLEAR_OREF | UART_CLEAR_FEF | UART_CLEAR_NEF);
 //        if (HAL_UART_Receive(&huart4, &b, 1U, 2U) == HAL_OK)
 //        {
 //            memmove(win, win + 1, 7U);
@@ -243,6 +244,220 @@
 //}
 //
 ///* ------------------------------------------------------------------ */
+///* ST-LINK (SWD) upload - no UART adapter needed                       */
+///*                                                                     */
+///* tools/swd_upload.py writes into this RAM mailbox through the        */
+///* debugger (STM32_Programmer_CLI, hot-plug, CPU keeps running) and    */
+///* the firmware stores the data in the W25Q64.                         */
+///*                                                                     */
+///*   0x24080000  mailbox (SwdMailbox)                                  */
+///*   0x24081000  data buffer, 256 KB (one chunk = up to 64 blocks)     */
+///*                                                                     */
+///* Commands (PC writes cmd/offset/length/crc, then seq LAST):          */
+///*   BEGIN  : header in mailbox -> validate, erase header sector       */
+///*   CHUNK  : buffer -> flash at VIDEO_DATA_ADDR + offset (CRC checked)*/
+///*   FINISH : verify whole-clip CRC, write header, start playing       */
+///* The firmware answers with status, then ack_seq = seq.               */
+///* ------------------------------------------------------------------ */
+//
+//#ifndef SWD_MB_ADDR
+//#define SWD_MB_ADDR    0x24080000UL
+//#endif
+//#ifndef SWD_BUF_ADDR
+//#define SWD_BUF_ADDR   0x24081000UL
+//#endif
+//#define SWD_BUF_SIZE   0x00040000UL
+//#define SWD_FW_MAGIC   0x3158424DUL      /* "MBX1" */
+//
+//enum { SWD_CMD_BEGIN = 1, SWD_CMD_CHUNK = 2, SWD_CMD_FINISH = 3 };
+//enum { SWD_ST_OK = 0, SWD_ST_BAD_HEADER = 1, SWD_ST_FLASH = 2, SWD_ST_BAD_ARG = 3,
+//       SWD_ST_CRC = 4, SWD_ST_VERIFY = 5, SWD_ST_NO_BEGIN = 6, SWD_ST_BAD_CMD = 7 };
+//
+//typedef struct
+//{
+//    volatile uint32_t fw_magic;    /* 0x00 FW  : set when the mailbox is ready            */
+//    volatile uint32_t cmd;         /* 0x04 PC                                             */
+//    volatile uint32_t offset;      /* 0x08 PC  : byte offset inside the clip data         */
+//    volatile uint32_t length;      /* 0x0C PC  : chunk length (multiple of 4096)          */
+//    volatile uint32_t crc;         /* 0x10 PC  : CRC-32 of the chunk                      */
+//    volatile uint32_t seq;         /* 0x14 PC  : written LAST = "command is complete"     */
+//    volatile uint32_t ack_seq;     /* 0x18 FW  : = seq when the command has been handled  */
+//    volatile uint32_t status;      /* 0x1C FW  : SWD_ST_*                                 */
+//    volatile uint32_t state;       /* 0x20 FW  : 0 = idle/playing, 1 = receiving          */
+//    uint32_t          reserved[7]; /* 0x24..0x3F                                          */
+//    volatile uint8_t  header[36];  /* 0x40 PC  : VideoHeader for BEGIN                    */
+//} SwdMailbox;
+//
+//_Static_assert(__builtin_offsetof(SwdMailbox, header) == 0x40U, "SwdMailbox layout");
+//
+//#define SWD_MB   ((SwdMailbox *)(uintptr_t)(SWD_MB_ADDR))
+//
+//extern uint8_t _ebss;                  /* end of .bss (linker script) */
+//
+//static VideoHeader s_swdHdr;
+//static uint8_t     s_swdHaveHdr = 0U;
+//static uint8_t     s_swdReload  = 0U;  /* a complete new clip is in flash -> (re)load it */
+//
+//static void swd_init(void)
+//{
+//    SwdMailbox *mb = SWD_MB;
+//
+//    /* The mailbox must lie above everything the linker placed in RAM. */
+//    if ((uintptr_t)&_ebss > (uintptr_t)SWD_MB_ADDR)
+//        return;
+//
+//    mb->fw_magic = 0U;
+//    mb->cmd      = 0U;
+//    mb->seq      = 0U;
+//    mb->ack_seq  = 0U;
+//    mb->status   = 0U;
+//    mb->state    = 0U;
+//    __DMB();
+//    mb->fw_magic = SWD_FW_MAGIC;
+//}
+//
+//static HAL_StatusTypeDef flash_store_block(uint32_t addr, const uint8_t *src)
+//{
+//    if (W25Q64_SectorErase(addr) != HAL_OK)
+//        return HAL_ERROR;
+//
+//    for (uint32_t off = 0U; off < BLOCK_SIZE; off += 256U)
+//    {
+//        if (W25Q64_PageProgram(addr + off, &src[off], 256U) != HAL_OK)
+//            return HAL_ERROR;
+//    }
+//    return HAL_OK;
+//}
+//
+///* Handle one pending command. Returns 1 if the stored clip changed
+// * (playback must stop / be reloaded), 0 otherwise. */
+//static uint8_t swd_service(void)
+//{
+//    SwdMailbox *mb = SWD_MB;
+//    const uint32_t seq = mb->seq;
+//
+//    if (mb->fw_magic != SWD_FW_MAGIC || seq == mb->ack_seq)
+//        return 0U;
+//
+//    __DMB();
+//    const uint32_t cmd = mb->cmd;
+//    const uint32_t off = mb->offset;
+//    const uint32_t len = mb->length;
+//    const uint32_t crc = mb->crc;
+//
+//    uint32_t st   = SWD_ST_OK;
+//    uint8_t  stop = 0U;
+//
+//    switch (cmd)
+//    {
+//    case SWD_CMD_BEGIN:
+//    {
+//        VideoHeader h;
+//        for (uint32_t i = 0U; i < sizeof(h); i++)
+//            ((uint8_t *)&h)[i] = mb->header[i];
+//
+//        if (!header_ok(&h))
+//        {
+//            st = SWD_ST_BAD_HEADER;
+//            break;
+//        }
+//
+//        s_hdrValid   = 0U;               /* old clip is going away */
+//        s_swdHaveHdr = 0U;
+//        stop         = 1U;
+//        LCD_FillColor(LCD_COLOR_BLUE);   /* blue = receiving */
+//        mb->state    = 1U;
+//
+//        if (W25Q64_SectorErase(VIDEO_FLASH_ADDR) != HAL_OK)
+//        {
+//            st = SWD_ST_FLASH;
+//            break;
+//        }
+//        s_swdHdr     = h;
+//        s_swdHaveHdr = 1U;
+//        break;
+//    }
+//
+//    case SWD_CMD_CHUNK:
+//    {
+//        if (!s_swdHaveHdr)
+//        {
+//            st = SWD_ST_NO_BEGIN;
+//            break;
+//        }
+//
+//        const uint32_t total = ((s_swdHdr.data_bytes + BLOCK_SIZE - 1U) / BLOCK_SIZE) * BLOCK_SIZE;
+//
+//        if (len == 0U || len > SWD_BUF_SIZE || (len % BLOCK_SIZE) != 0U ||
+//            (off % BLOCK_SIZE) != 0U || off > total || len > (total - off))
+//        {
+//            st = SWD_ST_BAD_ARG;
+//            break;
+//        }
+//
+//        if (Image_Crc32(0U, (const uint8_t *)(uintptr_t)SWD_BUF_ADDR, len) != crc)
+//        {
+//            st = SWD_ST_CRC;             /* damaged in RAM: the PC simply resends */
+//            break;
+//        }
+//
+//        for (uint32_t b = 0U; b < (len / BLOCK_SIZE); b++)
+//        {
+//            if (flash_store_block(VIDEO_DATA_ADDR + off + (b * BLOCK_SIZE),
+//                                  (const uint8_t *)(uintptr_t)(SWD_BUF_ADDR + (b * BLOCK_SIZE))) != HAL_OK)
+//            {
+//                st = SWD_ST_FLASH;
+//                LCD_FillColor(LCD_COLOR_RED);
+//                break;
+//            }
+//        }
+//        break;
+//    }
+//
+//    case SWD_CMD_FINISH:
+//    {
+//        if (!s_swdHaveHdr)
+//        {
+//            st = SWD_ST_NO_BEGIN;
+//            break;
+//        }
+//
+//        if (!verify_flash_crc(&s_swdHdr))
+//        {
+//            st = SWD_ST_VERIFY;
+//            LCD_FillColor(LCD_COLOR_RED);
+//            break;
+//        }
+//
+//        /* Header last: the clip only becomes valid when everything is stored. */
+//        if (W25Q64_PageProgram(VIDEO_FLASH_ADDR, (const uint8_t *)&s_swdHdr, sizeof(s_swdHdr)) != HAL_OK)
+//        {
+//            st = SWD_ST_FLASH;
+//            LCD_FillColor(LCD_COLOR_RED);
+//            break;
+//        }
+//
+//        LCD_FillColor(LCD_COLOR_GREEN);  /* green = stored + verified */
+//        HAL_Delay(700);
+//        s_swdHaveHdr = 0U;
+//        s_swdReload  = 1U;
+//        mb->state    = 0U;
+//        stop         = 1U;
+//        break;
+//    }
+//
+//    default:
+//        st = SWD_ST_BAD_CMD;
+//        break;
+//    }
+//
+//    mb->status = st;
+//    __DMB();
+//    mb->ack_seq = seq;                   /* answer: the PC polls this word */
+//    return stop;
+//}
+//
+///* ------------------------------------------------------------------ */
 ///* Playback                                                            */
 ///* ------------------------------------------------------------------ */
 //
@@ -294,6 +509,9 @@
 //
 //            LCD_DrawBitmap(s_frame, s_hdr.width, s_hdr.height, s_hdr.scale);
 //
+//            if (swd_service())               /* new upload started -> stop playing */
+//                return HAL_OK;
+//
 //            /* Pace to the clip's frame rate. If we are slower than that, don't wait. */
 //            next += period;
 //            if ((int32_t)(DWT->CYCCNT - next) >= 0)
@@ -321,20 +539,35 @@
 //
 //void Video_Run(void)
 //{
+//    swd_init();                              /* mailbox is usable from now on */
+//
 //    (void)Video_UploadListen(VIDEO_UPLOAD_WINDOW_MS);
 //
-//    if (Video_Load() == HAL_OK)
+//    for (;;)
 //    {
-//        (void)Video_PlayLoop();
-//        LCD_FillColor(LCD_COLOR_CYAN);       /* flash read error while playing */
+//        s_swdReload = 0U;
+//
+//        if (Video_Load() == HAL_OK)
+//        {
+//            if (Video_PlayLoop() != HAL_OK)
+//                LCD_FillColor(LCD_COLOR_CYAN);   /* flash read error while playing */
+//        }
+//        /* else: no clip stored yet -> the logo stays on screen */
+//
+//        /* Idle: keep answering the PC until a complete new clip has arrived. */
+//        while (!s_swdReload)
+//        {
+//            (void)swd_service();
+//            HAL_Delay(2);
+//        }
 //    }
-//    /* else: no clip stored yet -> the logo stays on screen */
 //}
 #include "video_player.h"
 #include "lcd.h"
 #include "w25q64.h"
 #include "image_store.h"      /* Image_Crc32() */
 #include <string.h>
+#include "usb_cdc.h"
 
 extern UART_HandleTypeDef huart4;
 
@@ -404,6 +637,74 @@ static uint8_t header_ok(const VideoHeader *h)
 /* ------------------------------------------------------------------ */
 
 static uint8_t s_block[BLOCK_SIZE + 4U];
+static uint8_t s_usbUploadReq = 0U;      /* the PC sent the handshake while a clip was playing */
+
+#if VIDEO_TRANSPORT_USB
+/* ---- USB CDC (virtual COM port) transport ------------------------- */
+
+static void tp_send_byte(uint8_t c)
+{
+    (void)USBCDC_Write(&c, 1U, 200U);
+}
+
+/* Throw away whatever is in flight until the line has been quiet for ~20 ms. */
+static void tp_drain(void)
+{
+    USBCDC_Flush(20U);
+}
+
+static HAL_StatusTypeDef tp_receive(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+{
+    return USBCDC_Read(buf, len, timeout_ms);
+}
+
+/* Non-blocking: run the pending bytes through an 8-byte window.
+ * Returns 1 as soon as the handshake "MPVUPLD1" has been seen. */
+static uint8_t tp_poll_magic(void)
+{
+    static const uint8_t magic[8] = { 'M', 'P', 'V', 'U', 'P', 'L', 'D', '1' };
+    static uint8_t win[8];
+    int b;
+
+    while ((b = USBCDC_ReadByteNow()) >= 0)
+    {
+        memmove(win, win + 1, 7U);
+        win[7] = (uint8_t)b;
+        if (memcmp(win, magic, 8U) == 0)
+        {
+            memset(win, 0, sizeof(win));
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+/* Boot window:
+ *   - no PC enumerated us within VIDEO_USB_ENUM_WAIT_MS -> do not wait, start playing;
+ *   - PC present -> wait window_ms for the handshake. (If it comes later, the play loop
+ *     notices it too, so no reset is needed.) */
+static uint8_t wait_for_magic(uint32_t window_ms)
+{
+    USBCDC_Start();
+
+    uint32_t t0 = HAL_GetTick();
+    while (!USBCDC_Configured())
+    {
+        if ((HAL_GetTick() - t0) >= VIDEO_USB_ENUM_WAIT_MS)
+            return 0U;
+    }
+
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < window_ms)
+    {
+        if (tp_poll_magic())
+            return 1U;
+    }
+    return 0U;
+}
+
+#else
+/* ---- UART4 transport ------------------------------------------------ */
 
 static void uart_set_baud(uint32_t baud)
 {
@@ -411,13 +712,12 @@ static void uart_set_baud(uint32_t baud)
     (void)HAL_UART_Init(&huart4);
 }
 
-static void uart_send_byte(uint8_t c)
+static void tp_send_byte(uint8_t c)
 {
     (void)HAL_UART_Transmit(&huart4, &c, 1U, 100U);
 }
 
-/* Throw away whatever is in flight until the line has been quiet for ~20 ms. */
-static void uart_drain(void)
+static void tp_drain(void)
 {
     uint8_t b;
     __HAL_UART_CLEAR_OREFLAG(&huart4);
@@ -425,6 +725,16 @@ static void uart_drain(void)
     {
     }
     __HAL_UART_CLEAR_OREFLAG(&huart4);
+}
+
+static HAL_StatusTypeDef tp_receive(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+{
+    return HAL_UART_Receive(&huart4, buf, (uint16_t)len, timeout_ms);
+}
+
+static uint8_t tp_poll_magic(void)
+{
+    return 0U;                               /* UART: only during the boot window */
 }
 
 static uint8_t wait_for_magic(uint32_t window_ms)
@@ -449,6 +759,7 @@ static uint8_t wait_for_magic(uint32_t window_ms)
     }
     return 0U;
 }
+#endif /* VIDEO_TRANSPORT_USB */
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -493,14 +804,14 @@ static VideoUploadResult do_upload(void)
 
     /* Tell the PC we are ready, THEN do the slow things (LCD fill, drain):
      * the PC waits ~300 ms after seeing 'R' before it sends the header. */
-    uart_send_byte('R');
+    tp_send_byte('R');
     LCD_FillColor(LCD_COLOR_BLUE);          /* blue = receiving */
-    uart_drain();
+    tp_drain();
 
-    if (HAL_UART_Receive(&huart4, (uint8_t *)&hdr, sizeof(hdr), 3000U) != HAL_OK ||
+    if (tp_receive((uint8_t *)&hdr, sizeof(hdr), 3000U) != HAL_OK ||
         !header_ok(&hdr))
     {
-        uart_send_byte('E');
+        tp_send_byte('E');
         return VIDEO_UPLOAD_FAILED;
     }
 
@@ -508,10 +819,10 @@ static VideoUploadResult do_upload(void)
     s_hdrValid = 0U;
     if (W25Q64_SectorErase(VIDEO_FLASH_ADDR) != HAL_OK)
     {
-        uart_send_byte('E');
+        tp_send_byte('E');
         return VIDEO_UPLOAD_FAILED;
     }
-    uart_send_byte('K');
+    tp_send_byte('K');
 
     const uint32_t blocks = (hdr.data_bytes + BLOCK_SIZE - 1U) / BLOCK_SIZE;
 
@@ -521,7 +832,7 @@ static VideoUploadResult do_upload(void)
 
         for (;;)
         {
-            if (HAL_UART_Receive(&huart4, s_block, BLOCK_SIZE + 4U, 2000U) == HAL_OK &&
+            if (tp_receive(s_block, BLOCK_SIZE + 4U, 2000U) == HAL_OK &&
                 Image_Crc32(0U, s_block, BLOCK_SIZE) == rd32(&s_block[BLOCK_SIZE]))
             {
                 break;                       /* good block */
@@ -529,41 +840,43 @@ static VideoUploadResult do_upload(void)
 
             if (++tries > BLOCK_RETRIES)
             {
-                uart_send_byte('E');
+                tp_send_byte('E');
                 return VIDEO_UPLOAD_FAILED;
             }
-            uart_drain();
-            uart_send_byte('N');             /* ask the PC to resend */
+            tp_drain();
+            tp_send_byte('N');             /* ask the PC to resend */
         }
 
         if (store_block(i) != HAL_OK)
         {
-            uart_send_byte('E');
+            tp_send_byte('E');
             return VIDEO_UPLOAD_FAILED;
         }
-        uart_send_byte('K');
+        tp_send_byte('K');
     }
 
     if (!verify_flash_crc(&hdr))
     {
-        uart_send_byte('F');
+        tp_send_byte('F');
         return VIDEO_UPLOAD_FAILED;
     }
 
     /* Header goes in last: the clip only becomes valid when everything is stored. */
     if (W25Q64_PageProgram(VIDEO_FLASH_ADDR, (const uint8_t *)&hdr, sizeof(hdr)) != HAL_OK)
     {
-        uart_send_byte('E');
+        tp_send_byte('E');
         return VIDEO_UPLOAD_FAILED;
     }
 
-    uart_send_byte('D');
+    tp_send_byte('D');
     return VIDEO_UPLOAD_OK;
 }
 
 VideoUploadResult Video_UploadListen(uint32_t window_ms)
 {
+#if !VIDEO_TRANSPORT_USB
     uart_set_baud(VIDEO_UPLOAD_BAUD);
+#endif
 
     if (!wait_for_magic(window_ms))
         return VIDEO_NO_UPLOAD;
@@ -844,6 +1157,12 @@ HAL_StatusTypeDef Video_PlayLoop(void)
             if (swd_service())               /* new upload started -> stop playing */
                 return HAL_OK;
 
+            if (tp_poll_magic())             /* PC started a USB upload -> stop playing */
+            {
+                s_usbUploadReq = 1U;
+                return HAL_OK;
+            }
+
             /* Pace to the clip's frame rate. If we are slower than that, don't wait. */
             next += period;
             if ((int32_t)(DWT->CYCCNT - next) >= 0)
@@ -877,7 +1196,8 @@ void Video_Run(void)
 
     for (;;)
     {
-        s_swdReload = 0U;
+        s_swdReload    = 0U;
+        s_usbUploadReq = 0U;
 
         if (Video_Load() == HAL_OK)
         {
@@ -887,10 +1207,20 @@ void Video_Run(void)
         /* else: no clip stored yet -> the logo stays on screen */
 
         /* Idle: keep answering the PC until a complete new clip has arrived. */
-        while (!s_swdReload)
+        while (!s_swdReload && !s_usbUploadReq)
         {
             (void)swd_service();
+            if (tp_poll_magic())
+                s_usbUploadReq = 1U;
             HAL_Delay(2);
+        }
+
+        if (s_usbUploadReq)                  /* PC sent "MPVUPLD1" over USB */
+        {
+            s_usbUploadReq = 0U;
+            VideoUploadResult r = do_upload();
+            LCD_FillColor((r == VIDEO_UPLOAD_OK) ? LCD_COLOR_GREEN : LCD_COLOR_RED);
+            HAL_Delay(700);
         }
     }
 }

@@ -15,18 +15,20 @@
 // *
 // * (the logo lives at 0x00100000, so nothing overlaps)
 // *
-// * The clip is loaded into the flash from the PC over UART4 (PA0 = TX, PA1 = RX)
-// * with tools/video_upload.py. For VIDEO_UPLOAD_WINDOW_MS after the logo is
-// * shown the board listens for the PC; if nothing comes it just plays the clip.
+// * The clip is loaded into the flash from the PC in one of two ways:
+// *   - over the ST-LINK (SWD), no extra hardware:  tools/swd_upload.py
+// *       (works any time, also while the clip is playing)
+// *   - over UART4 (PA0 = TX, PA1 = RX):             tools/video_upload.py
+// *       (only during VIDEO_UPLOAD_WINDOW_MS after boot)
 // */
 //
 //#define VIDEO_FLASH_ADDR        0x00200000U
 //#define VIDEO_DATA_ADDR         (VIDEO_FLASH_ADDR + 0x1000U)
 //#define VIDEO_MAX_BYTES         (W25Q64_CAPACITY_BYTES - VIDEO_DATA_ADDR)   /* 0x5FF000 */
 //
-//#define VIDEO_UPLOAD_WINDOW_MS  15000U     /* how long the logo is shown while waiting for the PC */
-////#define VIDEO_UPLOAD_BAUD       921600U
+//#define VIDEO_UPLOAD_WINDOW_MS  1000U     /* UART upload window after boot (the SWD upload needs no window) */
 //#define VIDEO_UPLOAD_BAUD       115200U
+//
 //typedef enum
 //{
 //    VIDEO_NO_UPLOAD     = 0,   /* nobody talked to us during the window */
@@ -46,7 +48,7 @@
 ///* Play the stored clip in an endless loop. Returns only on a flash read error / no clip. */
 //HAL_StatusTypeDef Video_PlayLoop(void);
 //
-///* Upload window, then play. Returns only if there is no (valid) clip or on error. */
+///* Upload window, then play. NEVER returns: it keeps answering SWD uploads. */
 //void Video_Run(void);
 //
 //#endif /* VIDEO_PLAYER_H */
@@ -78,8 +80,12 @@
 #define VIDEO_DATA_ADDR         (VIDEO_FLASH_ADDR + 0x1000U)
 #define VIDEO_MAX_BYTES         (W25Q64_CAPACITY_BYTES - VIDEO_DATA_ADDR)   /* 0x5FF000 */
 
-#define VIDEO_UPLOAD_WINDOW_MS  1000U     /* UART upload window after boot (the SWD upload needs no window) */
-#define VIDEO_UPLOAD_BAUD       115200U
+/* How the PC sends the clip: 1 = USB (virtual COM port on PA11/PA12), 0 = UART4 (PA0/PA1). */
+#define VIDEO_TRANSPORT_USB     1
+
+#define VIDEO_UPLOAD_WINDOW_MS  4000U     /* USB: how long the logo waits for the PC once it enumerated us */
+#define VIDEO_USB_ENUM_WAIT_MS  2500U     /* USB: no PC enumerated us within this time -> play at once */
+#define VIDEO_UPLOAD_BAUD       115200U   /* UART only */
 
 typedef enum
 {
