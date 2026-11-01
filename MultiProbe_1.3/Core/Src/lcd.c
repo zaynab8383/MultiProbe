@@ -1,32 +1,33 @@
 //#include "main.h"
 //#include "lcd.h"
 //#include "logo_image_rle.h"
+//#include "w25q64.h"
+//
 ///*
-// * ST7789VW, 240x240, 8-bit 8080 via FMC Bank1 (NE1).
+// * ST7789VW, 240x240, 8-bit 8080 parallel via FMC Bank1 (NE1).
 // *
 // * Hardware (from CubeMX + MULTIPROBE schematic):
 // *   D0..D7 = FMC_D0..D7
 // *   WR     = FMC_NWE (PD5)
 // *   RD     = FMC_NOE (PD4)
-// *   CS     = FMC_NE1 (PC7) and GPIO PA15 (LCD_CS)
-// *   DC/RS  = FMC_A19 (PE3) and GPIO PE13 (LCD_DC)
-// *   RESET  = PE12
+// *   CS     = FMC_NE1 (PC7) + GPIO PA15 (LCD_CS)
+// *   DC/RS  = FMC_A19 (PE3) + GPIO PE13 (LCD_DC)
+// *   RESET  = PE12 (LCD_RES)
 // *
 // * Command address A19=0 : 0x60000000
-// * Data address    A19=1 : 0x60080000  (bit 19, 8-bit bus)
+// * Data address    A19=1 : 0x60080000  (bit 19 of 8-bit bus)
 // */
 //
-//#include "w25q64.h"
-//
-//#define LCD_IMAGE_CHUNK_PIXELS  128U
-//
-//#define LCD_WIDTH   240U
-//#define LCD_HEIGHT  240U
+//#define LCD_IMAGE_CHUNK_PIXELS  256U   /* larger chunk = fewer OSPI transactions */
 //
 //#define LCD_CMD_ADDR   0x60000000UL
 //#define LCD_DATA_ADDR  0x60080000UL
 //
 //extern SRAM_HandleTypeDef hsram1;
+//
+///* ------------------------------------------------------------------ */
+///* Low-level helpers                                                   */
+///* ------------------------------------------------------------------ */
 //
 //static inline void LCD_Select(void)
 //{
@@ -71,14 +72,14 @@
 //{
 //    FMC_NORSRAM_TimingTypeDef timing = {0};
 //
-//    /* H7 FMC write FIFO packs 8-bit LCD writes and breaks commands. */
+//    /* H7 FMC write FIFO packs consecutive 8-bit writes and breaks LCD protocol. */
 //    hsram1.Init.WriteFifo = FMC_WRITE_FIFO_DISABLE;
 //
-//    /* Slow, reliable 8080 timing while bringing the panel up. */
-//    timing.AddressSetupTime      = 10;
-//    timing.AddressHoldTime       = 10;
-//    timing.DataSetupTime         = 50;
-//    timing.BusTurnAroundDuration = 10;
+//    /* Conservative but reliable 8080 timing (can be tightened later). */
+//    timing.AddressSetupTime      = 5;
+//    timing.AddressHoldTime       = 5;
+//    timing.DataSetupTime         = 30;
+//    timing.BusTurnAroundDuration = 5;
 //    timing.CLKDivision           = 2;
 //    timing.DataLatency           = 2;
 //    timing.AccessMode            = FMC_ACCESS_MODE_A;
@@ -91,14 +92,18 @@
 //
 //static void LCD_SetWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 //{
-//    LCD_WriteCommand(0x2AU);
+//    LCD_WriteCommand(0x2AU); /* CASET */
 //    LCD_WriteData16(x0);
 //    LCD_WriteData16(x1);
 //
-//    LCD_WriteCommand(0x2BU);
+//    LCD_WriteCommand(0x2BU); /* RASET */
 //    LCD_WriteData16(y0);
 //    LCD_WriteData16(y1);
 //}
+//
+///* ------------------------------------------------------------------ */
+///* Public API                                                          */
+///* ------------------------------------------------------------------ */
 //
 //void LCD_Init(void)
 //{
@@ -106,6 +111,7 @@
 //
 //    LCD_Select();
 //
+//    /* Hardware reset */
 //    HAL_GPIO_WritePin(LCD_RES_GPIO_Port, LCD_RES_Pin, GPIO_PIN_SET);
 //    HAL_Delay(10);
 //    HAL_GPIO_WritePin(LCD_RES_GPIO_Port, LCD_RES_Pin, GPIO_PIN_RESET);
@@ -120,12 +126,12 @@
 //    HAL_Delay(120);
 //
 //    LCD_WriteCommand(0x36); /* MADCTL */
-//    LCD_WriteData8(0x00);
+//    LCD_WriteData8(0x00);   /* RGB, no rotation */
 //
 //    LCD_WriteCommand(0x3A); /* COLMOD: 16-bit RGB565 */
 //    LCD_WriteData8(0x55);
 //
-//    LCD_WriteCommand(0xB2); /* Porch */
+//    LCD_WriteCommand(0xB2); /* Porch control */
 //    LCD_WriteData8(0x0C);
 //    LCD_WriteData8(0x0C);
 //    LCD_WriteData8(0x00);
@@ -157,6 +163,7 @@
 //    LCD_WriteData8(0xA4);
 //    LCD_WriteData8(0xA1);
 //
+//    /* Positive gamma */
 //    LCD_WriteCommand(0xE0);
 //    LCD_WriteData8(0xD0);
 //    LCD_WriteData8(0x04);
@@ -173,6 +180,7 @@
 //    LCD_WriteData8(0x1F);
 //    LCD_WriteData8(0x23);
 //
+//    /* Negative gamma */
 //    LCD_WriteCommand(0xE1);
 //    LCD_WriteData8(0xD0);
 //    LCD_WriteData8(0x04);
@@ -189,14 +197,14 @@
 //    LCD_WriteData8(0x20);
 //    LCD_WriteData8(0x23);
 //
-//    LCD_WriteCommand(0x21); /* INVON — IPS panels need this */
+//    LCD_WriteCommand(0x21); /* INVON — required for most IPS ST7789 panels */
 //    LCD_WriteCommand(0x13); /* NORON */
 //    HAL_Delay(10);
 //
 //    LCD_WriteCommand(0x29); /* DISPON */
 //    HAL_Delay(20);
 //
-//    /* Keep CS asserted; NE1 still strobes per FMC access. */
+//    /* CS stays low; FMC_NE1 still generates CS strobes per access. */
 //}
 //
 //void LCD_FillColor(uint16_t rgb565)
@@ -217,10 +225,31 @@
 //    }
 //}
 //
+//void LCD_DrawImage(const uint16_t *image)
+//{
+//    uint32_t i;
+//
+//    if (image == NULL)
+//        return;
+//
+//    LCD_Select();
+//    LCD_SetWindow(0U, 0U, LCD_WIDTH - 1U, LCD_HEIGHT - 1U);
+//    LCD_WriteCommand(0x2C); /* RAMWR */
+//    LCD_DC_Data();
+//
+//    for (i = 0U; i < ((uint32_t)LCD_WIDTH * LCD_HEIGHT); i++)
+//    {
+//        uint16_t pixel = image[i];
+//        FMC_Write8(LCD_DATA_ADDR, (uint8_t)(pixel >> 8));
+//        FMC_Write8(LCD_DATA_ADDR, (uint8_t)pixel);
+//    }
+//}
+//
 //void LCD_DrawLogo(void)
 //{
+//    /* Only useful when logo_image_rle.h contains the full RLE data */
 //    LCD_Select();
-//    LCD_SetWindow(0, 0, 239, 239);
+//    LCD_SetWindow(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1);
 //    LCD_WriteCommand(0x2C);
 //    LCD_DC_Data();
 //
@@ -228,7 +257,6 @@
 //    {
 //        uint16_t count = logo_rle[i].count;
 //        uint16_t color = logo_rle[i].color;
-//
 //        uint8_t high = (uint8_t)(color >> 8);
 //        uint8_t low  = (uint8_t)color;
 //
@@ -242,14 +270,13 @@
 //
 //HAL_StatusTypeDef LCD_DrawImageFromFlash(void)
 //{
+//    /* Static buffer so it does not eat stack. 256 pixels = 512 bytes. */
 //    static uint8_t imageChunk[LCD_IMAGE_CHUNK_PIXELS * 2U];
 //
 //    uint32_t pixelIndex = 0U;
-//    uint32_t remainingPixels =
-//        (uint32_t)LCD_WIDTH * (uint32_t)LCD_HEIGHT;
+//    uint32_t remainingPixels = (uint32_t)LCD_WIDTH * (uint32_t)LCD_HEIGHT;
 //
 //    LCD_Select();
-//
 //    LCD_SetWindow(0U, 0U, LCD_WIDTH - 1U, LCD_HEIGHT - 1U);
 //    LCD_WriteCommand(0x2CU); /* RAMWR */
 //    LCD_DC_Data();
@@ -257,20 +284,19 @@
 //    while (remainingPixels > 0U)
 //    {
 //        uint32_t chunkPixels = remainingPixels;
-//
 //        if (chunkPixels > LCD_IMAGE_CHUNK_PIXELS)
 //            chunkPixels = LCD_IMAGE_CHUNK_PIXELS;
 //
 //        uint32_t chunkBytes = chunkPixels * 2U;
 //
-//        if (W25Q64_Read(
-//                LCD_IMAGE_FLASH_ADDR + pixelIndex * 2U,
-//                imageChunk,
-//                chunkBytes) != HAL_OK)
+//        if (W25Q64_Read(LCD_IMAGE_FLASH_ADDR + (pixelIndex * 2U),
+//                        imageChunk,
+//                        chunkBytes) != HAL_OK)
 //        {
 //            return HAL_ERROR;
 //        }
 //
+//        /* Stream the raw RGB565 bytes (big-endian as stored) to LCD */
 //        for (uint32_t i = 0U; i < chunkBytes; i++)
 //        {
 //            FMC_Write8(LCD_DATA_ADDR, imageChunk[i]);
@@ -283,19 +309,97 @@
 //    return HAL_OK;
 //}
 //
+///* ------------------------------------------------------------------ */
+///* RAM image cache                                                     */
+///* The 115200-byte logo is read from the W25Q64 ONCE into this buffer  */
+///* (lives in internal AXI SRAM, .bss). Every frame is then drawn from  */
+///* RAM, which removes the ~28 ms OSPI read from each frame.            */
+///* ------------------------------------------------------------------ */
 //
-////void LCD_InitAndFillRed(void)
-////{
-////    LCD_Init();
-////    LCD_FillColor(LCD_COLOR_GREEN);
-////}
+//#define LCD_RAM_LOAD_CHUNK  16384U
 //
-//void LCD_InitAndFillRed(void)
+//static uint8_t s_imageRam[LCD_IMAGE_BYTES] __attribute__((aligned(4)));
+//static uint8_t s_imageRamValid = 0U;
+//
+//HAL_StatusTypeDef LCD_LoadImageToRam(void)
+//{
+//    s_imageRamValid = 0U;
+//
+//    for (uint32_t off = 0U; off < LCD_IMAGE_BYTES; off += LCD_RAM_LOAD_CHUNK)
+//    {
+//        uint32_t len = LCD_IMAGE_BYTES - off;
+//        if (len > LCD_RAM_LOAD_CHUNK)
+//            len = LCD_RAM_LOAD_CHUNK;
+//
+//        if (W25Q64_Read(LCD_IMAGE_FLASH_ADDR + off, &s_imageRam[off], len) != HAL_OK)
+//            return HAL_ERROR;
+//    }
+//
+//    s_imageRamValid = 1U;
+//    return HAL_OK;
+//}
+//
+//HAL_StatusTypeDef LCD_DrawImageFromRam(void)
+//{
+//    if (!s_imageRamValid)
+//        return HAL_ERROR;
+//
+//    LCD_Select();
+//    LCD_SetWindow(0U, 0U, LCD_WIDTH - 1U, LCD_HEIGHT - 1U);
+//    LCD_WriteCommand(0x2CU); /* RAMWR */
+//    LCD_DC_Data();
+//
+//    /* Bytes are already stored big-endian (hi, lo) as the LCD expects. */
+//    const uint8_t *p = s_imageRam;
+//    for (uint32_t i = 0U; i < LCD_IMAGE_BYTES; i++)
+//    {
+//        FMC_Write8(LCD_DATA_ADDR, p[i]);
+//    }
+//
+//    return HAL_OK;
+//}
+//
+//void LCD_DrawTestPattern(void)
+//{
+//    /* 4 colored quadrants + white border – useful when flash image is missing */
+//    LCD_Select();
+//    LCD_SetWindow(0U, 0U, LCD_WIDTH - 1U, LCD_HEIGHT - 1U);
+//    LCD_WriteCommand(0x2C);
+//    LCD_DC_Data();
+//
+//    for (uint16_t y = 0; y < LCD_HEIGHT; y++)
+//    {
+//        for (uint16_t x = 0; x < LCD_WIDTH; x++)
+//        {
+//            uint16_t color;
+//            if (x < 2 || x > 237 || y < 2 || y > 237)
+//                color = LCD_COLOR_WHITE;
+//            else if (x < 120 && y < 120)
+//                color = LCD_COLOR_RED;
+//            else if (x >= 120 && y < 120)
+//                color = LCD_COLOR_GREEN;
+//            else if (x < 120 && y >= 120)
+//                color = LCD_COLOR_BLUE;
+//            else
+//                color = LCD_COLOR_YELLOW;
+//
+//            FMC_Write8(LCD_DATA_ADDR, (uint8_t)(color >> 8));
+//            FMC_Write8(LCD_DATA_ADDR, (uint8_t)color);
+//        }
+//    }
+//}
+//
+//void LCD_InitAndShowImage(void)
 //{
 //    LCD_Init();
 //
-//    LCD_DrawLogo();
-//
+//    /* Prefer image stored in external flash.
+//     * If read fails (empty flash / wrong address / OSPI issue) fall back to test pattern.
+//     */
+//    if (LCD_DrawImageFromFlash() != HAL_OK)
+//    {
+//        LCD_DrawTestPattern();
+//    }
 //}
 //
 //void LCD_MPU_Config(void)
@@ -306,8 +410,8 @@
 //
 //    /*
 //     * 0x60000000 is Normal/cacheable by default on Cortex-M7.
-//     * Speculative reads strobe LCD RD and fill GRAM with noise.
-//     * Mark FMC Bank1 as Device so every access is a real bus cycle.
+//     * Speculative reads would strobe LCD RD and corrupt GRAM.
+//     * Mark the whole FMC Bank1 region as Device, non-cacheable.
 //     */
 //    mpu.Enable           = MPU_REGION_ENABLE;
 //    mpu.Number           = MPU_REGION_NUMBER0;
@@ -633,6 +737,111 @@ HAL_StatusTypeDef LCD_DrawImageFromFlash(void)
     }
 
     return HAL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* RAM image cache                                                     */
+/* The 115200-byte logo is read from the W25Q64 ONCE into this buffer  */
+/* (lives in internal AXI SRAM, .bss). Every frame is then drawn from  */
+/* RAM, which removes the ~28 ms OSPI read from each frame.            */
+/* ------------------------------------------------------------------ */
+
+#define LCD_RAM_LOAD_CHUNK  16384U
+
+static uint8_t s_imageRam[LCD_IMAGE_BYTES] __attribute__((aligned(4)));
+static uint8_t s_imageRamValid = 0U;
+
+HAL_StatusTypeDef LCD_LoadImageToRam(void)
+{
+    s_imageRamValid = 0U;
+
+    for (uint32_t off = 0U; off < LCD_IMAGE_BYTES; off += LCD_RAM_LOAD_CHUNK)
+    {
+        uint32_t len = LCD_IMAGE_BYTES - off;
+        if (len > LCD_RAM_LOAD_CHUNK)
+            len = LCD_RAM_LOAD_CHUNK;
+
+        if (W25Q64_Read(LCD_IMAGE_FLASH_ADDR + off, &s_imageRam[off], len) != HAL_OK)
+            return HAL_ERROR;
+    }
+
+    s_imageRamValid = 1U;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef LCD_DrawImageFromRam(void)
+{
+    if (!s_imageRamValid)
+        return HAL_ERROR;
+
+    LCD_Select();
+    LCD_SetWindow(0U, 0U, LCD_WIDTH - 1U, LCD_HEIGHT - 1U);
+    LCD_WriteCommand(0x2CU); /* RAMWR */
+    LCD_DC_Data();
+
+    /* Bytes are already stored big-endian (hi, lo) as the LCD expects. */
+    const uint8_t *p = s_imageRam;
+    for (uint32_t i = 0U; i < LCD_IMAGE_BYTES; i++)
+    {
+        FMC_Write8(LCD_DATA_ADDR, p[i]);
+    }
+
+    return HAL_OK;
+}
+
+/* Draw a w x h RGB565 (big-endian bytes) bitmap, each pixel enlarged scale x scale,
+ * centered on the screen. Used by the video player (e.g. 120x120 with scale 2 = fullscreen). */
+void LCD_DrawBitmap(const uint8_t *data, uint16_t w, uint16_t h, uint8_t scale)
+{
+    static uint8_t row[LCD_WIDTH * 2U];
+
+    if (data == NULL || w == 0U || h == 0U || scale == 0U)
+        return;
+
+    const uint32_t dw = (uint32_t)w * scale;
+    const uint32_t dh = (uint32_t)h * scale;
+    if (dw > LCD_WIDTH || dh > LCD_HEIGHT)
+        return;
+
+    const uint16_t x0 = (uint16_t)((LCD_WIDTH  - dw) / 2U);
+    const uint16_t y0 = (uint16_t)((LCD_HEIGHT - dh) / 2U);
+
+    LCD_Select();
+    LCD_SetWindow(x0, y0, (uint16_t)(x0 + dw - 1U), (uint16_t)(y0 + dh - 1U));
+    LCD_WriteCommand(0x2CU); /* RAMWR */
+    LCD_DC_Data();
+
+    if (scale == 1U)
+    {
+        for (uint32_t i = 0U; i < ((uint32_t)w * h * 2U); i++)
+            FMC_Write8(LCD_DATA_ADDR, data[i]);
+        return;
+    }
+
+    for (uint32_t y = 0U; y < h; y++)
+    {
+        const uint8_t *src = &data[(uint32_t)y * w * 2U];
+        uint32_t j = 0U;
+
+        /* build one enlarged row ... */
+        for (uint32_t x = 0U; x < w; x++)
+        {
+            const uint8_t hi = src[2U * x];
+            const uint8_t lo = src[2U * x + 1U];
+            for (uint8_t k = 0U; k < scale; k++)
+            {
+                row[j++] = hi;
+                row[j++] = lo;
+            }
+        }
+
+        /* ... and send it 'scale' times */
+        for (uint8_t k = 0U; k < scale; k++)
+        {
+            for (uint32_t i = 0U; i < j; i++)
+                FMC_Write8(LCD_DATA_ADDR, row[i]);
+        }
+    }
 }
 
 void LCD_DrawTestPattern(void)
