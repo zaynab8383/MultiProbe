@@ -65,6 +65,8 @@ void Error_Handler(void);
 #define LCD_DC_GPIO_Port GPIOE
 #define led1_Pin GPIO_PIN_6
 #define led1_GPIO_Port GPIOC
+#define Buzzer_Pin GPIO_PIN_8
+#define Buzzer_GPIO_Port GPIOC
 #define LCD_CS_Pin GPIO_PIN_15
 #define LCD_CS_GPIO_Port GPIOA
 
