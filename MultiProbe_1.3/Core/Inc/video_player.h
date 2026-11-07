@@ -1,3 +1,4 @@
+//
 //#ifndef VIDEO_PLAYER_H
 //#define VIDEO_PLAYER_H
 //
@@ -26,8 +27,12 @@
 //#define VIDEO_DATA_ADDR         (VIDEO_FLASH_ADDR + 0x1000U)
 //#define VIDEO_MAX_BYTES         (W25Q64_CAPACITY_BYTES - VIDEO_DATA_ADDR)   /* 0x5FF000 */
 //
-//#define VIDEO_UPLOAD_WINDOW_MS  1000U     /* UART upload window after boot (the SWD upload needs no window) */
-//#define VIDEO_UPLOAD_BAUD       115200U
+///* How the PC sends the clip: 1 = USB (virtual COM port on PA11/PA12), 0 = UART4 (PA0/PA1). */
+//#define VIDEO_TRANSPORT_USB     1
+//
+//#define VIDEO_UPLOAD_WINDOW_MS  4000U     /* USB: how long the logo waits for the PC once it enumerated us */
+//#define VIDEO_USB_ENUM_WAIT_MS  2500U     /* USB: no PC enumerated us within this time -> play at once */
+//#define VIDEO_UPLOAD_BAUD       115200U   /* UART only */
 //
 //typedef enum
 //{
@@ -52,6 +57,7 @@
 //void Video_Run(void);
 //
 //#endif /* VIDEO_PLAYER_H */
+
 #ifndef VIDEO_PLAYER_H
 #define VIDEO_PLAYER_H
 
@@ -106,7 +112,11 @@ HAL_StatusTypeDef Video_Load(void);
 /* Play the stored clip in an endless loop. Returns only on a flash read error / no clip. */
 HAL_StatusTypeDef Video_PlayLoop(void);
 
-/* Upload window, then play. NEVER returns: it keeps answering SWD uploads. */
+/* Boot step: mailbox init + short USB upload window (returns after the window). */
+void Video_Boot(void);
+/* Play the clip from the menu. Returns when the user presses BACK. */
+void Video_Menu(void);
+/* Old behaviour: Video_Boot() then play until BACK. */
 void Video_Run(void);
 
 #endif /* VIDEO_PLAYER_H */

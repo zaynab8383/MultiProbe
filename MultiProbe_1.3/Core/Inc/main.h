@@ -69,6 +69,18 @@ void Error_Handler(void);
 #define Buzzer_GPIO_Port GPIOC
 #define LCD_CS_Pin GPIO_PIN_15
 #define LCD_CS_GPIO_Port GPIOA
+#define Enter_Pin GPIO_PIN_6
+#define Enter_GPIO_Port GPIOD
+#define Back_Pin GPIO_PIN_7
+#define Back_GPIO_Port GPIOD
+#define Up_Pin GPIO_PIN_3
+#define Up_GPIO_Port GPIOB
+#define Right_Pin GPIO_PIN_4
+#define Right_GPIO_Port GPIOB
+#define left_Pin GPIO_PIN_5
+#define left_GPIO_Port GPIOB
+#define Down_Pin GPIO_PIN_8
+#define Down_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

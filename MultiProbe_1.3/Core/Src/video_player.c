@@ -1,8 +1,12 @@
+//
 //#include "video_player.h"
 //#include "lcd.h"
 //#include "w25q64.h"
 //#include "image_store.h"      /* Image_Crc32() */
 //#include <string.h>
+//#include "usb_cdc.h"
+//#include "keypad.h"
+//#include "statusbar.h"
 //
 //extern UART_HandleTypeDef huart4;
 //
@@ -72,6 +76,74 @@
 ///* ------------------------------------------------------------------ */
 //
 //static uint8_t s_block[BLOCK_SIZE + 4U];
+//static uint8_t s_usbUploadReq = 0U;      /* the PC sent the handshake while a clip was playing */
+//
+//#if VIDEO_TRANSPORT_USB
+///* ---- USB CDC (virtual COM port) transport ------------------------- */
+//
+//static void tp_send_byte(uint8_t c)
+//{
+//    (void)USBCDC_Write(&c, 1U, 200U);
+//}
+//
+///* Throw away whatever is in flight until the line has been quiet for ~20 ms. */
+//static void tp_drain(void)
+//{
+//    USBCDC_Flush(20U);
+//}
+//
+//static HAL_StatusTypeDef tp_receive(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+//{
+//    return USBCDC_Read(buf, len, timeout_ms);
+//}
+//
+///* Non-blocking: run the pending bytes through an 8-byte window.
+// * Returns 1 as soon as the handshake "MPVUPLD1" has been seen. */
+//static uint8_t tp_poll_magic(void)
+//{
+//    static const uint8_t magic[8] = { 'M', 'P', 'V', 'U', 'P', 'L', 'D', '1' };
+//    static uint8_t win[8];
+//    int b;
+//
+//    while ((b = USBCDC_ReadByteNow()) >= 0)
+//    {
+//        memmove(win, win + 1, 7U);
+//        win[7] = (uint8_t)b;
+//        if (memcmp(win, magic, 8U) == 0)
+//        {
+//            memset(win, 0, sizeof(win));
+//            return 1U;
+//        }
+//    }
+//    return 0U;
+//}
+//
+///* Boot window:
+// *   - no PC enumerated us within VIDEO_USB_ENUM_WAIT_MS -> do not wait, start playing;
+// *   - PC present -> wait window_ms for the handshake. (If it comes later, the play loop
+// *     notices it too, so no reset is needed.) */
+//static uint8_t wait_for_magic(uint32_t window_ms)
+//{
+//    USBCDC_Start();
+//
+//    uint32_t t0 = HAL_GetTick();
+//    while (!USBCDC_Configured())
+//    {
+//        if ((HAL_GetTick() - t0) >= VIDEO_USB_ENUM_WAIT_MS)
+//            return 0U;
+//    }
+//
+//    t0 = HAL_GetTick();
+//    while ((HAL_GetTick() - t0) < window_ms)
+//    {
+//        if (tp_poll_magic())
+//            return 1U;
+//    }
+//    return 0U;
+//}
+//
+//#else
+///* ---- UART4 transport ------------------------------------------------ */
 //
 //static void uart_set_baud(uint32_t baud)
 //{
@@ -79,13 +151,12 @@
 //    (void)HAL_UART_Init(&huart4);
 //}
 //
-//static void uart_send_byte(uint8_t c)
+//static void tp_send_byte(uint8_t c)
 //{
 //    (void)HAL_UART_Transmit(&huart4, &c, 1U, 100U);
 //}
 //
-///* Throw away whatever is in flight until the line has been quiet for ~20 ms. */
-//static void uart_drain(void)
+//static void tp_drain(void)
 //{
 //    uint8_t b;
 //    __HAL_UART_CLEAR_OREFLAG(&huart4);
@@ -93,6 +164,16 @@
 //    {
 //    }
 //    __HAL_UART_CLEAR_OREFLAG(&huart4);
+//}
+//
+//static HAL_StatusTypeDef tp_receive(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+//{
+//    return HAL_UART_Receive(&huart4, buf, (uint16_t)len, timeout_ms);
+//}
+//
+//static uint8_t tp_poll_magic(void)
+//{
+//    return 0U;                               /* UART: only during the boot window */
 //}
 //
 //static uint8_t wait_for_magic(uint32_t window_ms)
@@ -117,6 +198,7 @@
 //    }
 //    return 0U;
 //}
+//#endif /* VIDEO_TRANSPORT_USB */
 //
 //static uint32_t rd32(const uint8_t *p)
 //{
@@ -161,14 +243,14 @@
 //
 //    /* Tell the PC we are ready, THEN do the slow things (LCD fill, drain):
 //     * the PC waits ~300 ms after seeing 'R' before it sends the header. */
-//    uart_send_byte('R');
+//    tp_send_byte('R');
 //    LCD_FillColor(LCD_COLOR_BLUE);          /* blue = receiving */
-//    uart_drain();
+//    tp_drain();
 //
-//    if (HAL_UART_Receive(&huart4, (uint8_t *)&hdr, sizeof(hdr), 3000U) != HAL_OK ||
+//    if (tp_receive((uint8_t *)&hdr, sizeof(hdr), 3000U) != HAL_OK ||
 //        !header_ok(&hdr))
 //    {
-//        uart_send_byte('E');
+//        tp_send_byte('E');
 //        return VIDEO_UPLOAD_FAILED;
 //    }
 //
@@ -176,10 +258,10 @@
 //    s_hdrValid = 0U;
 //    if (W25Q64_SectorErase(VIDEO_FLASH_ADDR) != HAL_OK)
 //    {
-//        uart_send_byte('E');
+//        tp_send_byte('E');
 //        return VIDEO_UPLOAD_FAILED;
 //    }
-//    uart_send_byte('K');
+//    tp_send_byte('K');
 //
 //    const uint32_t blocks = (hdr.data_bytes + BLOCK_SIZE - 1U) / BLOCK_SIZE;
 //
@@ -189,7 +271,7 @@
 //
 //        for (;;)
 //        {
-//            if (HAL_UART_Receive(&huart4, s_block, BLOCK_SIZE + 4U, 2000U) == HAL_OK &&
+//            if (tp_receive(s_block, BLOCK_SIZE + 4U, 2000U) == HAL_OK &&
 //                Image_Crc32(0U, s_block, BLOCK_SIZE) == rd32(&s_block[BLOCK_SIZE]))
 //            {
 //                break;                       /* good block */
@@ -197,41 +279,43 @@
 //
 //            if (++tries > BLOCK_RETRIES)
 //            {
-//                uart_send_byte('E');
+//                tp_send_byte('E');
 //                return VIDEO_UPLOAD_FAILED;
 //            }
-//            uart_drain();
-//            uart_send_byte('N');             /* ask the PC to resend */
+//            tp_drain();
+//            tp_send_byte('N');             /* ask the PC to resend */
 //        }
 //
 //        if (store_block(i) != HAL_OK)
 //        {
-//            uart_send_byte('E');
+//            tp_send_byte('E');
 //            return VIDEO_UPLOAD_FAILED;
 //        }
-//        uart_send_byte('K');
+//        tp_send_byte('K');
 //    }
 //
 //    if (!verify_flash_crc(&hdr))
 //    {
-//        uart_send_byte('F');
+//        tp_send_byte('F');
 //        return VIDEO_UPLOAD_FAILED;
 //    }
 //
 //    /* Header goes in last: the clip only becomes valid when everything is stored. */
 //    if (W25Q64_PageProgram(VIDEO_FLASH_ADDR, (const uint8_t *)&hdr, sizeof(hdr)) != HAL_OK)
 //    {
-//        uart_send_byte('E');
+//        tp_send_byte('E');
 //        return VIDEO_UPLOAD_FAILED;
 //    }
 //
-//    uart_send_byte('D');
+//    tp_send_byte('D');
 //    return VIDEO_UPLOAD_OK;
 //}
 //
 //VideoUploadResult Video_UploadListen(uint32_t window_ms)
 //{
+//#if !VIDEO_TRANSPORT_USB
 //    uart_set_baud(VIDEO_UPLOAD_BAUD);
+//#endif
 //
 //    if (!wait_for_magic(window_ms))
 //        return VIDEO_NO_UPLOAD;
@@ -512,6 +596,12 @@
 //            if (swd_service())               /* new upload started -> stop playing */
 //                return HAL_OK;
 //
+//            if (tp_poll_magic())             /* PC started a USB upload -> stop playing */
+//            {
+//                s_usbUploadReq = 1U;
+//                return HAL_OK;
+//            }
+//
 //            /* Pace to the clip's frame rate. If we are slower than that, don't wait. */
 //            next += period;
 //            if ((int32_t)(DWT->CYCCNT - next) >= 0)
@@ -545,7 +635,8 @@
 //
 //    for (;;)
 //    {
-//        s_swdReload = 0U;
+//        s_swdReload    = 0U;
+//        s_usbUploadReq = 0U;
 //
 //        if (Video_Load() == HAL_OK)
 //        {
@@ -555,19 +646,32 @@
 //        /* else: no clip stored yet -> the logo stays on screen */
 //
 //        /* Idle: keep answering the PC until a complete new clip has arrived. */
-//        while (!s_swdReload)
+//        while (!s_swdReload && !s_usbUploadReq)
 //        {
 //            (void)swd_service();
+//            if (tp_poll_magic())
+//                s_usbUploadReq = 1U;
 //            HAL_Delay(2);
+//        }
+//
+//        if (s_usbUploadReq)                  /* PC sent "MPVUPLD1" over USB */
+//        {
+//            s_usbUploadReq = 0U;
+//            VideoUploadResult r = do_upload();
+//            LCD_FillColor((r == VIDEO_UPLOAD_OK) ? LCD_COLOR_GREEN : LCD_COLOR_RED);
+//            HAL_Delay(700);
 //        }
 //    }
 //}
+
 #include "video_player.h"
 #include "lcd.h"
 #include "w25q64.h"
 #include "image_store.h"      /* Image_Crc32() */
 #include <string.h>
 #include "usb_cdc.h"
+#include "keypad.h"
+#include "statusbar.h"
 
 extern UART_HandleTypeDef huart4;
 
@@ -638,6 +742,8 @@ static uint8_t header_ok(const VideoHeader *h)
 
 static uint8_t s_block[BLOCK_SIZE + 4U];
 static uint8_t s_usbUploadReq = 0U;      /* the PC sent the handshake while a clip was playing */
+static volatile uint8_t s_exitReq = 0U;      /* user pressed BACK */
+static uint8_t s_booted = 0U;
 
 #if VIDEO_TRANSPORT_USB
 /* ---- USB CDC (virtual COM port) transport ------------------------- */
@@ -1163,6 +1269,12 @@ HAL_StatusTypeDef Video_PlayLoop(void)
                 return HAL_OK;
             }
 
+            if (Keypad_Poll() == MENU_INPUT_BACK)   /* BACK -> back to the menu */
+            {
+                s_exitReq = 1U;
+                return HAL_OK;
+            }
+
             /* Pace to the clip's frame rate. If we are slower than that, don't wait. */
             next += period;
             if ((int32_t)(DWT->CYCCNT - next) >= 0)
@@ -1188,12 +1300,16 @@ HAL_StatusTypeDef Video_PlayLoop(void)
     }
 }
 
-void Video_Run(void)
+static void video_show_no_clip(void)
 {
-    swd_init();                              /* mailbox is usable from now on */
+    LCD_FillColor(LCD_COLOR_BLACK);
+    LCD_DrawString(40U, 100U, "NO VIDEO", LCD_COLOR_WHITE, LCD_COLOR_BLACK, 2U);
+    LCD_DrawString(30U, 130U, "send it from the PC", LCD_COLOR_YELLOW, LCD_COLOR_BLACK, 1U);
+    LCD_DrawString(30U, 146U, "BACK = menu", LCD_COLOR_YELLOW, LCD_COLOR_BLACK, 1U);
+}
 
-    (void)Video_UploadListen(VIDEO_UPLOAD_WINDOW_MS);
-
+static void video_loop(void)
+{
     for (;;)
     {
         s_swdReload    = 0U;
@@ -1204,16 +1320,25 @@ void Video_Run(void)
             if (Video_PlayLoop() != HAL_OK)
                 LCD_FillColor(LCD_COLOR_CYAN);   /* flash read error while playing */
         }
-        /* else: no clip stored yet -> the logo stays on screen */
+        else
+        {
+            video_show_no_clip();
+        }
 
-        /* Idle: keep answering the PC until a complete new clip has arrived. */
-        while (!s_swdReload && !s_usbUploadReq)
+        if (s_exitReq) { s_exitReq = 0U; return; }
+
+        /* Idle: keep answering the PC until a complete new clip has arrived (or BACK). */
+        while (!s_swdReload && !s_usbUploadReq && !s_exitReq)
         {
             (void)swd_service();
             if (tp_poll_magic())
                 s_usbUploadReq = 1U;
+            if (Keypad_Poll() == MENU_INPUT_BACK)
+                s_exitReq = 1U;
             HAL_Delay(2);
         }
+
+        if (s_exitReq) { s_exitReq = 0U; return; }
 
         if (s_usbUploadReq)                  /* PC sent "MPVUPLD1" over USB */
         {
@@ -1223,4 +1348,28 @@ void Video_Run(void)
             HAL_Delay(700);
         }
     }
+}
+
+void Video_Boot(void)
+{
+    swd_init();                              /* mailbox is usable from now on */
+    s_booted = 1U;
+    (void)Video_UploadListen(VIDEO_UPLOAD_WINDOW_MS);
+}
+
+void Video_Menu(void)
+{
+    if (!s_booted)
+    {
+        swd_init();
+        s_booted = 1U;
+    }
+    s_exitReq = 0U;
+    video_loop();
+}
+
+void Video_Run(void)
+{
+    Video_Boot();
+    video_loop();
 }

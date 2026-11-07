@@ -457,7 +457,106 @@ void LCD_InitAndShowImage(void)
         LCD_DrawTestPattern();
     }
 }
+/* ------------------------------------------------------------------ */
+/* Status bar helpers: fill a rectangle, draw text (small built-in font) */
+/* ------------------------------------------------------------------ */
 
+void LCD_FillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
+{
+    if (x >= LCD_WIDTH || y >= LCD_HEIGHT) return;
+    if ((uint32_t)x + w > LCD_WIDTH)  w = (uint16_t)(LCD_WIDTH  - x);
+    if ((uint32_t)y + h > LCD_HEIGHT) h = (uint16_t)(LCD_HEIGHT - y);
+
+    const uint8_t hi = (uint8_t)(color >> 8);
+    const uint8_t lo = (uint8_t)color;
+
+    LCD_Select();
+    LCD_SetWindow(x, y, (uint16_t)(x + w - 1U), (uint16_t)(y + h - 1U));
+    LCD_WriteCommand(0x2C); /* RAMWR */
+    LCD_DC_Data();
+
+    uint32_t n = (uint32_t)w * h;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        FMC_Write8(LCD_DATA_ADDR, hi);
+        FMC_Write8(LCD_DATA_ADDR, lo);
+    }
+}
+
+/* Tiny 3x5 font: digits, '.', 'V', '-', space — enough for "12.4V" */
+#define FONT_W 3U
+#define FONT_H 5U
+
+static const uint8_t s_font[14][FONT_H] = {
+    {0x7,0x5,0x5,0x5,0x7}, /* 0 */
+    {0x2,0x6,0x2,0x2,0x7}, /* 1 */
+    {0x7,0x1,0x7,0x4,0x7}, /* 2 */
+    {0x7,0x1,0x7,0x1,0x7}, /* 3 */
+    {0x5,0x5,0x7,0x1,0x1}, /* 4 */
+    {0x7,0x4,0x7,0x1,0x7}, /* 5 */
+    {0x7,0x4,0x7,0x5,0x7}, /* 6 */
+    {0x7,0x1,0x1,0x1,0x1}, /* 7 */
+    {0x7,0x5,0x7,0x5,0x7}, /* 8 */
+    {0x7,0x5,0x7,0x1,0x7}, /* 9 */
+    {0x0,0x0,0x0,0x0,0x2}, /* . */
+    {0x5,0x5,0x5,0x5,0x2}, /* V */
+    {0x0,0x0,0x7,0x0,0x0}, /* - */
+    {0x0,0x0,0x0,0x0,0x0}, /* space / unknown */
+};
+
+static int8_t FontIndex(char c)
+{
+    if (c >= '0' && c <= '9') return (int8_t)(c - '0');
+    if (c == '.') return 10;
+    if (c == 'V') return 11;
+    if (c == '-') return 12;
+    return 13;
+}
+
+void LCD_DrawChar(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale)
+{
+    const uint8_t *glyph = s_font[FontIndex(c)];
+    uint16_t w = (uint16_t)(FONT_W * scale);
+    uint16_t h = (uint16_t)(FONT_H * scale);
+    if ((uint32_t)x + w > LCD_WIDTH || (uint32_t)y + h > LCD_HEIGHT) return;
+
+    LCD_Select();
+    LCD_SetWindow(x, y, (uint16_t)(x + w - 1U), (uint16_t)(y + h - 1U));
+    LCD_WriteCommand(0x2C);
+    LCD_DC_Data();
+
+    for (uint8_t ry = 0U; ry < FONT_H; ry++)
+    {
+        uint8_t row = glyph[ry];
+        for (uint8_t sy = 0U; sy < scale; sy++)
+        {
+            for (uint8_t rx = 0U; rx < FONT_W; rx++)
+            {
+                uint8_t bit = (uint8_t)((row >> (FONT_W - 1U - rx)) & 1U);
+                uint16_t color = bit ? fg : bg;
+                uint8_t hi = (uint8_t)(color >> 8);
+                uint8_t lo = (uint8_t)color;
+                for (uint8_t sx = 0U; sx < scale; sx++)
+                {
+                    FMC_Write8(LCD_DATA_ADDR, hi);
+                    FMC_Write8(LCD_DATA_ADDR, lo);
+                }
+            }
+        }
+    }
+}
+
+void LCD_DrawString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale)
+{
+    uint16_t cx = x;
+    uint16_t step = (uint16_t)((FONT_W + 1U) * scale);
+    while (*s)
+    {
+        LCD_DrawChar(cx, y, *s, fg, bg, scale);
+        cx = (uint16_t)(cx + step);
+        s++;
+    }
+}
 void LCD_MPU_Config(void)
 {
     MPU_Region_InitTypeDef mpu = {0};
