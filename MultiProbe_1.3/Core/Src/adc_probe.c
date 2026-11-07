@@ -76,9 +76,8 @@ uint8_t Adc_CalibrateZero(void)
     return 1U;
 }
 
-float Adc_GetVin(void)
+float Adc_PinToVin(float p)
 {
-    float p = Adc_GetPC4();
     float z = s_pc4Zero;
     float c;
     if (p <= z)                c = 0.0f;
@@ -86,6 +85,44 @@ float Adc_GetVin(void)
     else                       c = (p - z) * PC4_KNEE_V / (PC4_KNEE_V - z);
     float v = c * DIVIDER_VIN;
     return (v < 0.05f) ? 0.0f : v;
+}
+
+float Adc_GetVin(void)
+{
+    return Adc_PinToVin(Adc_GetPC4());
+}
+
+uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
+{
+    ADC_ChannelConfTypeDef cfg = {0};
+    cfg.Channel      = ADC_CHANNEL_4;
+    cfg.Rank         = ADC_REGULAR_RANK_1;
+    cfg.SamplingTime = ADC_SAMPLETIME_8CYCLES_5;
+    cfg.SingleDiff   = ADC_SINGLE_ENDED;
+    cfg.OffsetNumber = ADC_OFFSET_NONE;
+    if (HAL_ADC_ConfigChannel(&hadc1, &cfg) != HAL_OK) return 0U;
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+
+    uint32_t t0 = DWT->CYCCNT;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        HAL_ADC_Start(&hadc1);
+        if (HAL_ADC_PollForConversion(&hadc1, 2U) == HAL_OK)
+            dst[i] = (uint16_t)HAL_ADC_GetValue(&hadc1);
+        else
+            dst[i] = (i > 0U) ? dst[i - 1U] : 0U;
+
+        if (gap_cycles != 0U)
+        {
+            uint32_t t = DWT->CYCCNT;
+            while ((DWT->CYCCNT - t) < gap_cycles) { }
+        }
+    }
+    uint32_t cyc = DWT->CYCCNT - t0;
+    HAL_ADC_Stop(&hadc1);
+    return cyc;
 }
 
 float Adc_GetPB1(void) { return (to_volt(read_raw(&hadc1, ADC_CHANNEL_5,  ADC_SAMPLETIME_64CYCLES_5)) - BIAS_PB1) * RATIO_PB1; }

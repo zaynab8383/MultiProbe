@@ -31,6 +31,7 @@
 #include "keypad.h"
 #include "menu.h"
 #include "app.h"
+#include "carousel.h"
 #include "probe_hw.h"
 /* USER CODE END Includes */
 
@@ -203,7 +204,7 @@ int main(void)
   /* منوی اصلی */
   LCD_FillColor(LCD_COLOR_BLACK);
   StatusBar_Init();
-  Menu_Init(App_RootScreen());
+  Carousel_Init();
   /* USER CODE END 2 */
 #if LCD_FPS_BENCHMARK
   /* Redraws the cached image 100 times and stores the result in
@@ -235,13 +236,17 @@ int main(void)
     MenuInput_t in = Keypad_Poll();
     if (in != MENU_INPUT_NONE)
     {
-      Menu_HandleInput(in);      /* برنامه‌ها (ولت‌متر و ...) داخل همین صدا زده می‌شن و با BACK برمی‌گردن */
+      Carousel_HandleInput(in);   /* LEFT/RIGHT = صفحه‌ی بعد/قبل ، ENTER = ورود به صفحه */
     }
     StatusBar_Task();
-    float vin = Adc_GetVin();
-    LEDs_UpdateVoltage(vin);
-    Menu_Draw();
 
+    static uint32_t lastLed = 0U;
+    if ((HAL_GetTick() - lastLed) >= 150U)
+    {
+      lastLed = HAL_GetTick();
+      LEDs_UpdateVoltage(Adc_GetVin());
+    }
+    Carousel_Draw();
   }
   /* USER CODE END 3 */
 }

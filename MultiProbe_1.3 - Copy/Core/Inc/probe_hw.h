@@ -24,6 +24,8 @@ void  Probe_PwmStop(void);
 /* نمونه‌برداری سریع و استخراج مشخصات سیگنال (~۲۰ms بلاک می‌شه) */
 void  Probe_Measure(ReadSrc_t src, SigStat_t *out);
 const char *Probe_ReadName(ReadSrc_t src);
+uint32_t Probe_Capture(ReadSrc_t src, uint16_t *dst, uint32_t n);   /* CPU cycles taken, 0 = error */
+float Probe_CountsToVolts(ReadSrc_t src, uint32_t counts);
 float Probe_ReadVolts(ReadSrc_t src);         /* ولتاژ DC (میانگین)، با ضریب تقسیم */
 
 /* اهم‌متر */

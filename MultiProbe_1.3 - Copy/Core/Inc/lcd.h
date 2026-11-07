@@ -52,4 +52,8 @@ void LCD_DrawChar(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint
 
 /* Draw a string using the built-in font */
 void LCD_DrawString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale);
+/* Draw a 1 bit/pixel bitmap (MSB first, 1 = fg, 0 = bg) */
+void LCD_DrawBitmap1bpp(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                        const uint8_t *bits, uint16_t fg, uint16_t bg);
+
 #endif /* INC_LCD_H */

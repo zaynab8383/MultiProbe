@@ -58,3 +58,14 @@ MenuInput_t Keypad_Poll(void)
     }
     return MENU_INPUT_NONE;
 }
+
+/* 1 while the given key is held down (active low) -- used by the key test page */
+uint8_t Keypad_RawPressed(MenuInput_t key)
+{
+    for (uint8_t i = 0U; i < KEY_COUNT; i++)
+    {
+        if (s_keys[i].input == key)
+            return (HAL_GPIO_ReadPin(s_keys[i].port, s_keys[i].pin) == GPIO_PIN_RESET) ? 1U : 0U;
+    }
+    return 0U;
+}

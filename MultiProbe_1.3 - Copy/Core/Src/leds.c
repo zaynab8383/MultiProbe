@@ -82,3 +82,17 @@ void LEDs_UpdateVoltage(float voltage)
         );
     }
 }
+
+/* idx: 0 = yellow (3.3V), 1 = blue (signal), 2 = green (5V), 3 = red (12V) */
+void LEDs_Set(uint8_t idx, uint8_t on)
+{
+    GPIO_PinState st = on ? GPIO_PIN_SET : GPIO_PIN_RESET;
+    switch (idx)
+    {
+    case 0: HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, st); break;
+    case 1: HAL_GPIO_WritePin(LED_BLUE_PORT,   LED_BLUE_PIN,   st); break;
+    case 2: HAL_GPIO_WritePin(LED_GREEN_PORT,  LED_GREEN_PIN,  st); break;
+    case 3: HAL_GPIO_WritePin(LED_RED_PORT,    LED_RED_PIN,    st); break;
+    default: break;
+    }
+}
