@@ -1,11 +1,16 @@
 #include "app.h"
 #include "ui.h"
 #include "lcd.h"
+#include "leds.h"
 #include "adc_probe.h"
 #include "probe_hw.h"
 #include "board_map.h"
 #include "statusbar.h"
 #include "video_player.h"
+#include "keypad.h"
+#include "menu.h"
+#include "carousel.h"
+#include "pages_assets.h"
 #include <stdio.h>
 
 extern ADC_HandleTypeDef hadc1;
@@ -25,30 +30,53 @@ static void beep_ms(uint32_t ms)
 static void App_Voltmeter(void)
 {
     UI_Begin("VOLTMETER");
-    UI_Hint("BACK = exit");
+    UI_Hint("OK=zero  LEFT=reset  BACK=exit");
 
+    char msg[24] = "";
+    uint32_t msgUntil = 0U;
     uint32_t last = 0U - 1000U;
     for (;;)
     {
-        if (UI_Poll() == MENU_INPUT_BACK) break;
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        if (in == MENU_INPUT_SELECT)
+        {
+            /* پروب‌ها باید روی GND باشن */
+            snprintf(msg, sizeof msg, "%s", Adc_CalibrateZero() ? "Zero set" : "Not zero!");
+            msgUntil = HAL_GetTick() + 1500U;
+            last = 0U - 1000U;
+        }
+        if (in == MENU_INPUT_LEFT)
+        {
+            Adc_ResetZero();
+            snprintf(msg, sizeof msg, "Zero reset");
+            msgUntil = HAL_GetTick() + 1500U;
+            last = 0U - 1000U;
+        }
         if (!TICK_DUE(last, 250U)) continue;
         last = HAL_GetTick();
 
         char v[16], b[32];
-        UI_FmtFixed(v, sizeof v, Adc_GetVin(), 2);
-        snprintf(b, sizeof b, "VIN       %s V", v);   UI_Row(0U, UI_FG, UI_BG, b);
-        UI_FmtFixed(v, sizeof v, Adc_GetPB1(), 2);
-        snprintf(b, sizeof b, "P1 (PB1)  %s V", v);   UI_Row(1U, UI_FG, UI_BG, b);
-        UI_FmtFixed(v, sizeof v, Adc_GetPA6(), 2);
-        snprintf(b, sizeof b, "PA6       %s V", v);   UI_Row(2U, UI_FG, UI_BG, b);
-        UI_FmtFixed(v, sizeof v, Adc_GetPA2(), 2);
-        snprintf(b, sizeof b, "PA2       %s V", v);   UI_Row(3U, UI_FG, UI_BG, b);
-        UI_FmtFixed(v, sizeof v, Adc_GetPC1(), 2);
-        snprintf(b, sizeof b, "PC1       %s V", v);   UI_Row(4U, UI_FG, UI_BG, b);
+        float vin = Adc_GetVin();
+        LEDs_UpdateVoltage(vin);
 
+        UI_FmtFixed(v, sizeof v, vin, 2);
+        snprintf(b, sizeof b, "%s V", v);
+        UI_Text(4U, 56U, 3U, UI_OK, UI_BG, b);
+
+        UI_FmtFixed(v, sizeof v, Adc_GetPC4(), 3);
+        snprintf(b, sizeof b, "PC4  %s V", v);
+        UI_Row(3U, UI_DIM, UI_BG, b);
+        UI_FmtFixed(v, sizeof v, Adc_GetZero(), 3);
+        snprintf(b, sizeof b, "Zero %s V", v);
+        UI_Row(4U, UI_DIM, UI_BG, b);
         UI_FmtFixed(v, sizeof v, g_vdda, 2);
-        snprintf(b, sizeof b, "VDDA      %s V", v);   UI_Row(6U, UI_DIM, UI_BG, b);
+        snprintf(b, sizeof b, "VDDA %s V", v);
+        UI_Row(5U, UI_DIM, UI_BG, b);
+
+        UI_Row(7U, UI_TITLE, UI_BG, (HAL_GetTick() < msgUntil) ? msg : "");
     }
+    LEDs_AllOff();
 }
 
 /* ================================================================== */
@@ -78,6 +106,7 @@ static void fmt_ohm(char *dst, size_t n, float r)
 
 static void App_Ohmmeter(void)
 {
+    LEDs_AllOff();
     UI_Begin("OHMMETER");
     UI_Hint("L/R range  BACK exit");
 
@@ -136,6 +165,7 @@ static const uint32_t k_freqs[] = { 10U, 50U, 100U, 500U, 1000U, 2000U, 5000U, 1
 
 static void App_Pwm(void)
 {
+    LEDs_AllOff();
     UI_Begin("PWM GEN/READ");
     UI_Hint("U/D sel L/R chg OK run");
 
@@ -213,6 +243,8 @@ static void App_Pwm(void)
             SigStat_t s;
             Probe_Measure(rd, &s);
 
+            LED_Blue_Set(s.signal);
+
             char b[32], t1[12], t2[12];
             UI_FmtFixed(t1, sizeof t1, s.vmax, 2);
             UI_FmtFixed(t2, sizeof t2, s.vmin, 2);
@@ -240,6 +272,7 @@ static void App_Pwm(void)
             }
         }
     }
+    LED_Blue_Set(0);
     Probe_PwmStop();
 }
 
@@ -248,6 +281,7 @@ static void App_Pwm(void)
 /* ================================================================== */
 static void App_Dac(void)
 {
+    LEDs_AllOff();
     UI_Begin("DAC OUT");
     UI_Hint("U/D volt L/R ch OK on/off");
 
@@ -307,6 +341,7 @@ static const TestPin_t k_testPins[] = {
 
 static void App_GpioTest(void)
 {
+    LEDs_AllOff();
     UI_Begin("GPIO TEST");
     UI_Hint("U/D sel OK toggle BACK");
 
@@ -364,22 +399,205 @@ static void App_Video(void)
 }
 
 /* ================================================================== */
-/*  Root menu                                                          */
+/*  Key test: raw state of the six keys                                */
 /* ================================================================== */
-static const MenuItem_t s_rootItems[] = {
-    { "Voltmeter",  App_Voltmeter },
-    { "Ohmmeter",   App_Ohmmeter  },
-    { "PWM Gen/Read", App_Pwm     },
-    { "DAC Out",    App_Dac       },
-    { "Buzzer",     App_Buzzer    },
-    { "Video",      App_Video     },
-    { "GPIO Test",  App_GpioTest  },
-};
+static void App_KeyTest(void)
+{
+    static const struct { const char *name; MenuInput_t k; } keys[] = {
+        { "Enter", MENU_INPUT_SELECT }, { "Back ", MENU_INPUT_BACK },
+        { "Up   ", MENU_INPUT_UP },     { "Down ", MENU_INPUT_DOWN },
+        { "Left ", MENU_INPUT_LEFT },   { "Right", MENU_INPUT_RIGHT },
+    };
+    LEDs_AllOff();
+    UI_Begin("KEY TEST");
+    UI_Hint("hold a key; BACK twice = exit");
 
-static const MenuScreen_t s_rootScreen = {
-    .title = "MAIN MENU",
-    .items = s_rootItems,
-    .count = (uint8_t)(sizeof(s_rootItems) / sizeof(s_rootItems[0])),
-};
+    uint8_t backCount = 0U;
+    uint32_t lastBack = 0U;
+    for (;;)
+    {
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK)
+        {
+            if (backCount && (HAL_GetTick() - lastBack) < 1000U) break;
+            backCount = 1U; lastBack = HAL_GetTick();
+        }
+        for (uint8_t i = 0U; i < 6U; i++)
+        {
+            char b[32];
+            uint8_t p = Keypad_RawPressed(keys[i].k);
+            snprintf(b, sizeof b, "%s %s", keys[i].name, p ? "PRESSED" : "-");
+            UI_Row(i, p ? UI_OK : UI_FG, UI_BG, b);
+        }
+    }
+}
 
-const MenuScreen_t *App_RootScreen(void) { return &s_rootScreen; }
+/* ================================================================== */
+/*  LED test: each LED in turn                                         */
+/* ================================================================== */
+static void App_LedTest(void)
+{
+    UI_Begin("LED TEST");
+    UI_Row(0U, UI_FG, UI_BG, "yellow blue green red");
+    for (uint8_t i = 0U; i < 4U; i++)
+    {
+        LEDs_AllOff();
+        LEDs_Set(i, 1U);
+        HAL_Delay(500);
+    }
+    LEDs_AllOff();
+}
+
+/* ================================================================== */
+/*  Oscilloscope                                                       */
+/* ================================================================== */
+#define SCOPE_N      4096U
+#define SCOPE_Y0     52U
+#define SCOPE_H      150U
+static uint16_t s_scopeBuf[SCOPE_N];
+
+static void App_Scope(void)
+{
+    LEDs_AllOff();
+    UI_Begin("SCOPE");
+    UI_Hint("U/D src  L/R zoom  BACK");
+
+    static const uint8_t zoom[] = { 1U, 2U, 4U, 8U, 16U };
+    uint8_t zi = 1U;
+    ReadSrc_t src = RD_PB1;
+    uint32_t last = 0U - 1000U;
+
+    for (;;)
+    {
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        if (in == MENU_INPUT_RIGHT) zi = (uint8_t)((zi + 1U) % sizeof(zoom));
+        if (in == MENU_INPUT_LEFT)  zi = (uint8_t)((zi + sizeof(zoom) - 1U) % sizeof(zoom));
+        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN) src = (src == RD_PB1) ? RD_PA6 : RD_PB1;
+        if (!TICK_DUE(last, 120U)) continue;
+        last = HAL_GetTick();
+
+        uint32_t cyc = Probe_Capture(src, s_scopeBuf, SCOPE_N);
+        if (cyc == 0U) continue;
+
+        uint32_t mn = 65535U, mx = 0U;
+        for (uint32_t i = 0U; i < SCOPE_N; i++)
+        {
+            if (s_scopeBuf[i] < mn) mn = s_scopeBuf[i];
+            if (s_scopeBuf[i] > mx) mx = s_scopeBuf[i];
+        }
+        /* trigger: first rising crossing of the mid level in the first half */
+        uint32_t mid = (mn + mx) / 2U, start = 0U;
+        uint32_t span = mx - mn;
+        if (span > 2000U)
+        {
+            for (uint32_t i = 1U; i < SCOPE_N / 2U; i++)
+            {
+                if (s_scopeBuf[i - 1U] < mid && s_scopeBuf[i] >= mid) { start = i; break; }
+            }
+        }
+
+        uint32_t top = (mx > 6000U) ? mx + mx / 8U : 6000U;   /* vertical scale: 0 .. top */
+        LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
+        for (uint16_t g = 1U; g < 4U; g++)                     /* grid */
+            LCD_FillRect(0U, (uint16_t)(SCOPE_Y0 + (SCOPE_H * g) / 4U), LCD_WIDTH, 1U, 0x2104U);
+
+        uint16_t prevY = 0U;
+        for (uint16_t x = 0U; x < LCD_WIDTH; x++)
+        {
+            uint32_t idx = start + (uint32_t)x * zoom[zi];
+            if (idx >= SCOPE_N) break;
+            uint32_t v = s_scopeBuf[idx];
+            uint16_t y = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U - (v * (SCOPE_H - 1U)) / top);
+            uint16_t y0 = (x == 0U) ? y : ((y < prevY) ? y : prevY);
+            uint16_t y1 = (x == 0U) ? y : ((y < prevY) ? prevY : y);
+            LCD_FillRect(x, y0, 1U, (uint16_t)(y1 - y0 + 1U), UI_OK);
+            prevY = y;
+        }
+
+        char b[40], t1[12], t2[12];
+        float dt_us = ((float)cyc / (float)SystemCoreClock) * 1.0e6f / (float)SCOPE_N;
+        float win_ms = dt_us * (float)zoom[zi] * (float)LCD_WIDTH / 1000.0f;
+        UI_FmtFixed(t1, sizeof t1, Probe_CountsToVolts(src, mx), 2);
+        UI_FmtFixed(t2, sizeof t2, win_ms, 2);
+        snprintf(b, sizeof b, "%s Vmax %s  %s ms", Probe_ReadName(src), t1, t2);
+        UI_Text(2U, 204U, 1U, UI_DIM, UI_BG, b);
+        LED_Blue_Set(span > 2000U);
+    }
+    LEDs_AllOff();
+}
+
+/* ================================================================== */
+/*  Coming soon                                                        */
+/* ================================================================== */
+static void App_ComingSoon(uint8_t idx)
+{
+    LEDs_AllOff();
+    LCD_FillRect(0U, 24U, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - 24U), 0xFFFFU);
+    const PageTitle_t *t = &g_pageTitles[idx];
+    LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - t->w) / 2U), 44U, t->w, t->h, t->bits, 0x7945U, 0xFFFFU);
+    LCD_DrawBitmap1bpp((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, PAGE_ICON_W, PAGE_ICON_H, g_pageIcons[idx].bits, 0xA828U, 0xFFFFU);
+    const PageTitle_t *c = &g_pageTitles[TITLE_COMING_SOON];
+    LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - c->w) / 2U), 192U, c->w, c->h, c->bits, 0xA828U, 0xFFFFU);
+    LCD_DrawString(78U, 218U, "Coming soon", 0x7BEFU, 0xFFFFU, 1U);
+    for (;;)
+    {
+        if (UI_Poll() == MENU_INPUT_BACK) break;
+    }
+}
+
+/* ================================================================== */
+/*  Sub menus (UP / DOWN = move, ENTER = open, BACK = leave)           */
+/* ================================================================== */
+static void RunSubMenu(const MenuScreen_t *scr)
+{
+    Menu_Init(scr);
+    for (;;)
+    {
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        if (in != MENU_INPUT_NONE) Menu_HandleInput(in);
+        Menu_Draw();
+    }
+}
+
+static const MenuItem_t s_testItems[] = {
+    { "GPIO Test", App_GpioTest },
+    { "Key Test",  App_KeyTest  },
+    { "LED Test",  App_LedTest  },
+    { "Video",     App_Video    },
+};
+static const MenuScreen_t s_testScreen = {
+    .title = "TESTS", .items = s_testItems,
+    .count = (uint8_t)(sizeof(s_testItems) / sizeof(s_testItems[0])),
+};
+static void App_Tests(void) { RunSubMenu(&s_testScreen); }
+
+static const MenuItem_t s_simItems[] = {
+    { "PWM Gen/Read", App_Pwm },
+    { "DAC Out",      App_Dac },
+};
+static const MenuScreen_t s_simScreen = {
+    .title = "SENSOR SIM", .items = s_simItems,
+    .count = (uint8_t)(sizeof(s_simItems) / sizeof(s_simItems[0])),
+};
+static void App_SensorSim(void) { RunSubMenu(&s_simScreen); }
+
+/* ================================================================== */
+/*  Home pages -> functions                                            */
+/*   0 Dashboard  1 Tests  2 Logic analyzer  3 Voltmeter  4 Simulator  */
+/*   5 Scope  6 Ohmmeter  7 Buzzer  8 ECU flash                        */
+/* ================================================================== */
+void App_RunPage(uint8_t idx)
+{
+    switch (idx)
+    {
+    case 1: App_Tests();     break;
+    case 3: App_Voltmeter(); break;
+    case 4: App_SensorSim(); break;
+    case 5: App_Scope();     break;
+    case 6: App_Ohmmeter();  break;
+    case 7: App_Buzzer();    break;
+    default: App_ComingSoon(idx); break;     /* 0, 2, 8 */
+    }
+}

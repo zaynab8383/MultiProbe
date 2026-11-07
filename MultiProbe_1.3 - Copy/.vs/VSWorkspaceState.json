@@ -1,0 +1,14 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\.settings",
+    "\\Core",
+    "\\Core\\Src",
+    "\\Debug",
+    "\\Debug\\Core",
+    "\\Debug\\Core\\Src",
+    "\\Debug\\Drivers"
+  ],
+  "SelectedNode": "\\Debug\\MultiProbe_1.3.list",
+  "PreviewInSolutionExplorer": false
+}

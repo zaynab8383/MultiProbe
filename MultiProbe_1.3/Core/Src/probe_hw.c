@@ -141,6 +141,42 @@ float Probe_ReadVolts(ReadSrc_t s)
     return Adc_ReadPinVolts(h, ch) * ratio;
 }
 
+/* n نمونه‌ی پشت‌سرهم از یک کانال؛ برمی‌گردونه چند سیکل CPU طول کشید (0 = خطا) */
+uint32_t Probe_Capture(ReadSrc_t src, uint16_t *dst, uint32_t n)
+{
+    ADC_HandleTypeDef *h; uint32_t ch; float ratio;
+    src_info(src, &h, &ch, &ratio);
+
+    ADC_ChannelConfTypeDef cfg = {0};
+    cfg.Channel      = ch;
+    cfg.Rank         = ADC_REGULAR_RANK_1;
+    cfg.SamplingTime = ADC_SAMPLETIME_8CYCLES_5;
+    cfg.SingleDiff   = ADC_SINGLE_ENDED;
+    cfg.OffsetNumber = ADC_OFFSET_NONE;
+    if (HAL_ADC_ConfigChannel(h, &cfg) != HAL_OK) return 0U;
+
+    uint32_t t0 = DWT->CYCCNT;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        HAL_ADC_Start(h);
+        if (HAL_ADC_PollForConversion(h, 2U) == HAL_OK)
+            dst[i] = (uint16_t)HAL_ADC_GetValue(h);
+        else
+            dst[i] = (i > 0U) ? dst[i - 1U] : 0U;
+    }
+    uint32_t cyc = DWT->CYCCNT - t0;
+    HAL_ADC_Stop(h);
+    return cyc;
+}
+
+float Probe_CountsToVolts(ReadSrc_t src, uint32_t counts)
+{
+    ADC_HandleTypeDef *h; uint32_t ch; float ratio;
+    src_info(src, &h, &ch, &ratio);
+    (void)h; (void)ch;
+    return (float)counts * 3.3f / 65535.0f * ratio;
+}
+
 void Probe_Measure(ReadSrc_t src, SigStat_t *o)
 {
     ADC_HandleTypeDef *h; uint32_t ch; float ratio;

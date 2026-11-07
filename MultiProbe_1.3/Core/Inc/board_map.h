@@ -29,9 +29,10 @@
 /*    می‌ذاشت (HIGH). اگه برعکس بود فقط این دو خط رو عوض کن.            */
 /*    صفحه‌ی "GPIO Test" توی منو برای تست همین موضوع است.               */
 /* ------------------------------------------------------------------ */
-#define SW_IDLE_LEVEL    GPIO_PIN_SET
-#define SW_ACTIVE_LEVEL  GPIO_PIN_RESET
-
+//#define SW_IDLE_LEVEL    GPIO_PIN_SET
+//#define SW_ACTIVE_LEVEL  GPIO_PIN_RESET
+#define SW_IDLE_LEVEL    GPIO_PIN_RESET
+#define SW_ACTIVE_LEVEL  GPIO_PIN_SET
 #define SW_DAC1_PORT GPIOE   /* PE11 -> R23 -> Q1,Q2,Q3  (⚠ فرض: مسیر DAC کانال ۱) */
 #define SW_DAC1_PIN  GPIO_PIN_11
 #define SW_DAC2_PORT GPIOB   /* PB10 -> R46 -> Q4,Q5,Q6  (⚠ فرض: مسیر DAC کانال ۲) */

@@ -8,7 +8,7 @@ extern OPAMP_HandleTypeDef hopamp1;
 #define ADC_MAX        65535.0f
 #define AVG_SAMPLES    16
 
-#define DIVIDER_VIN    11.0f   /* (R8 + R6) / R6 */
+#define DIVIDER_VIN    13.6466f   /* (R8 + R6) / R6 */
 #define BIAS_PB1       1.66f
 #define RATIO_PB1      1.0f    /* ⚠ از مهندس بگیر */
 #define RATIO_PA6      6.1f    /* ⚠ فرض: 5.1K / 1K */
@@ -52,7 +52,41 @@ void Adc_Init(void)
 
 float Adc_GetPC4(void) { return to_volt(read_raw(&hadc1, ADC_CHANNEL_4,  ADC_SAMPLETIME_64CYCLES_5)); }
 float Adc_GetPB0(void) { return to_volt(read_raw(&hadc1, ADC_CHANNEL_9,  ADC_SAMPLETIME_810CYCLES_5)); }
-float Adc_GetVin(void) { return Adc_GetPC4() * DIVIDER_VIN; }
+
+/* ---- تصحیح صفر ----
+ * وقتی ورودی 0 ولته، PC4 حدود 0.095 ولت می‌خونه (کف خروجی OPAMP / آفست)، یعنی ~1.3 ولت اضافه روی نمایش.
+ * زیر "زانو" (PC4_KNEE_V) به‌صورت خطی کشیده می‌شه که 0 -> 0 بشه و بالای زانو هیچ تغییری نکنه.
+ * با دکمه‌ی ورود توی صفحه‌ی ولت‌متر (پروب‌ها روی GND) مقدار صفر دوباره کالیبره می‌شه. */
+#define PC4_ZERO_DEFAULT_V  0.0953f
+#define PC4_KNEE_V          0.25f
+#define PC4_ZERO_MAX_V      0.20f     /* بیشتر از این به‌عنوان "صفر" قبول نمی‌شه */
+
+static float s_pc4Zero = PC4_ZERO_DEFAULT_V;
+
+float Adc_GetZero(void) { return s_pc4Zero; }
+void  Adc_ResetZero(void) { s_pc4Zero = PC4_ZERO_DEFAULT_V; }
+
+uint8_t Adc_CalibrateZero(void)
+{
+    float sum = 0.0f;
+    for (int i = 0; i < 8; i++) sum += Adc_GetPC4();
+    float z = sum / 8.0f;
+    if (z > PC4_ZERO_MAX_V) return 0U;
+    s_pc4Zero = z;
+    return 1U;
+}
+
+float Adc_GetVin(void)
+{
+    float p = Adc_GetPC4();
+    float z = s_pc4Zero;
+    float c;
+    if (p <= z)                c = 0.0f;
+    else if (p >= PC4_KNEE_V)  c = p;
+    else                       c = (p - z) * PC4_KNEE_V / (PC4_KNEE_V - z);
+    float v = c * DIVIDER_VIN;
+    return (v < 0.05f) ? 0.0f : v;
+}
 
 float Adc_GetPB1(void) { return (to_volt(read_raw(&hadc1, ADC_CHANNEL_5,  ADC_SAMPLETIME_64CYCLES_5)) - BIAS_PB1) * RATIO_PB1; }
 float Adc_GetPA6(void) { return to_volt(read_raw(&hadc1, ADC_CHANNEL_3,  ADC_SAMPLETIME_64CYCLES_5)) * RATIO_PA6; }
