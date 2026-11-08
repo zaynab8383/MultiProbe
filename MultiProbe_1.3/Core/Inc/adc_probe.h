@@ -17,6 +17,9 @@ float Adc_GetPB0(void);   /* ولتاژ تقسیم‌شده قبل از بافر
 float Adc_GetPC4(void);   /* خروجی OPAMP1، ADC1_IN4 */
 float Adc_GetPB1(void);   /* ADC1_IN5، خروجی U7A، بعد از کم کردن آفست */
 float Adc_GetPA6(void);   /* ADC1_IN3 */
+float Adc_GetSupply(void);   /* ولتاژ تغذیه‌ی برد (VCC) از PA2 × 11 */
+float Adc_GetSupplyScale(void);   /* ضریب فعلی PA2 -> VCC */
+void  Adc_AdjustSupply(float dv); /* ولتاژ نمایشی رو به اندازه‌ی dv کم/زیاد می‌کنه (کالیبراسیون) */
 float Adc_GetPA2(void);   /* ADC1_IN14 */
 float Adc_GetPC1(void);   /* ADC2_IN11 */
 float Adc_ReadPinVolts(ADC_HandleTypeDef *hadc, uint32_t channel);

@@ -171,7 +171,9 @@ static void App_Voltmeter(void)
     LCD_FillRect(VM_BOX_X, VM_BOX_Y, VM_BOX_W, VM_BOX_H, UI_Theme()->accent);
     LCD_FillRect(VM_IX, VM_IY, VM_IW, VM_IH, VM_BG);
 
-    static const uint16_t k_tbUs[] = { 0U, 10U, 100U };     /* فاصله‌ی بین نمونه‌ها: سریع / ۱۰µs / ۱۰۰µs */
+    /* فاصله‌ی اضافه بین نمونه‌ها (µs). ردیف آخر صفحه پهنای زمانی کل نمودار رو نشون می‌ده (~ms) */
+    static const uint16_t k_tbUs[] = { 0U, 2U, 5U, 10U, 20U, 50U, 100U, 200U };
+    const uint8_t TB_N = (uint8_t)(sizeof(k_tbUs) / sizeof(k_tbUs[0]));
     uint8_t tb = 0U;
 
     char msg[24] = "";
@@ -195,8 +197,9 @@ static void App_Voltmeter(void)
             msgUntil = HAL_GetTick() + 1500U;
             last = 0U - 1000U;
         }
-        if (in == MENU_INPUT_UP)   { tb = (uint8_t)((tb + 1U) % 3U); last = 0U - 1000U; }
-        if (in == MENU_INPUT_DOWN) { tb = (uint8_t)((tb + 2U) % 3U); last = 0U - 1000U; }
+        /* بالا = بازه‌ی زمانی بزرگ‌تر (نمونه‌ها کندتر) ، پایین = کوچک‌تر (سریع‌تر) */
+        if (in == MENU_INPUT_UP   && tb + 1U < TB_N) { tb++; last = 0U - 1000U; }
+        if (in == MENU_INPUT_DOWN && tb > 0U)        { tb--; last = 0U - 1000U; }
         if (!TICK_DUE(last, 200U)) continue;
         last = HAL_GetTick();
 
@@ -758,7 +761,7 @@ static void App_ComingSoon(uint8_t idx)
     LCD_FillRect(0U, 24U, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - 24U), th->bg);
     const PageTitle_t *t = &g_pageTitles[idx];
     LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - t->w) / 2U), 44U, t->w, t->h, t->bits, th->dark, th->bg);
-    LCD_DrawBitmap1bpp((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, PAGE_ICON_W, PAGE_ICON_H, g_pageIcons[idx].bits, th->accent, th->bg);
+    UI_DrawPageIcon((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, idx);
     const PageTitle_t *c = &g_pageTitles[TITLE_COMING_SOON];
     LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - c->w) / 2U), 192U, c->w, c->h, c->bits, th->accent, th->bg);
     LCD_DrawString(78U, 218U, "Coming soon", th->dark, th->bg, 1U);

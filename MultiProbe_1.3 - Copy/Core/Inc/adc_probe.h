@@ -5,6 +5,10 @@
 
 void  Adc_Init(void);
 
+float Adc_PinToVin(float pin_volts);   /* ولتاژ پایه‌ی PC4 -> ولتاژ ورودی (با تصحیح صفر و ضریب تقسیم) */
+/* n نمونه‌ی سریع از PC4 (بدون میانگین). gap_cycles = فاصله‌ی اضافه بین نمونه‌ها (سیکل CPU).
+ * خروجی: تعداد سیکل CPU کل، 0 = خطا */
+uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles);
 float Adc_GetVin(void);   /* ولتاژ ورودی با تصحیح صفر */
 float Adc_GetZero(void);
 void  Adc_ResetZero(void);

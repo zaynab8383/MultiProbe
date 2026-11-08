@@ -14,6 +14,7 @@ typedef struct {
 
 #define UI_THEME_COUNT  9U
 
+void             UI_DrawPageIcon(uint16_t x, uint16_t y, uint8_t idx);   /* colored icon on the page bg */
 void             UI_SetTheme(uint8_t idx);        /* also recolors the status bar */
 const UiTheme_t *UI_Theme(void);                  /* current theme */
 const UiTheme_t *UI_ThemeOf(uint8_t idx);

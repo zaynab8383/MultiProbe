@@ -2,12 +2,15 @@
 #include "pages_assets.h"
 #include "lcd.h"
 #include "statusbar.h"
+#include "ui.h"
 
-#define COL_BG       0xFFFFU
-#define COL_LINE     0xA828U     /* red-brown, like the reference photos */
-#define COL_TITLE    0x7945U
-#define COL_DOT_OFF  0xC618U
-#define COL_SUB      0x7BEFU
+/* رنگ‌ها از تم همین صفحه می‌آد (ui.c) */
+static const UiTheme_t *s_t;
+#define COL_BG       (s_t->bg)
+#define COL_LINE     (s_t->accent)
+#define COL_TITLE    (s_t->dark)
+#define COL_DOT_OFF  (s_t->light)
+#define COL_SUB      (s_t->dark)
 
 #define Y_TOP        STATUSBAR_H_PX
 
@@ -79,6 +82,7 @@ static void draw_frame(void)
 void Carousel_DrawPage(uint8_t idx);
 void Carousel_DrawPage(uint8_t idx)
 {
+    s_t = UI_ThemeOf(idx);
     LCD_FillRect(0U, Y_TOP, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - Y_TOP), COL_BG);
     draw_frame();
 
@@ -98,6 +102,7 @@ void Carousel_Draw(void)
     if (!s_dirty) return;
     s_dirty = 0U;
 
+    UI_SetTheme(s_cur);            /* status bar takes the page color too */
     Carousel_DrawPage(s_cur);
 
     tri_left(12U, 132U);

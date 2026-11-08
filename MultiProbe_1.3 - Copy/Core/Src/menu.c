@@ -1,6 +1,7 @@
 #include "menu.h"
 #include "lcd.h"
 #include "statusbar.h"
+#include "ui.h"
 #include <string.h>
 
 #define MENU_MAX_DEPTH   6U
@@ -9,7 +10,17 @@
 
 #define COLOR_BG         LCD_COLOR_BLACK
 #define COLOR_TEXT       LCD_COLOR_WHITE
-#define COLOR_SEL_BG     0x001FU   /* آبی */
+
+/* هر آیتم یه رنگ خودش رو داره */
+static const uint16_t k_itemColors[] = {
+    0x07FFU,   /* cyan    */
+    0xFFE0U,   /* yellow  */
+    0x07E0U,   /* green   */
+    0xFD20U,   /* orange  */
+    0xF81FU,   /* magenta */
+    0xFFFFU,   /* white   */
+};
+#define ITEM_COLORS ((uint8_t)(sizeof(k_itemColors) / sizeof(k_itemColors[0])))
 
 static const MenuScreen_t *s_stack[MENU_MAX_DEPTH];
 static uint8_t s_depth = 0U;
@@ -89,17 +100,25 @@ void Menu_Draw(void)
     const MenuScreen_t *scr = Current();
     if (scr == NULL) return;
 
+    const UiTheme_t *th = UI_Theme();
+
     /* پاک کردن ناحیه زیر نوار وضعیت (نه کل صفحه) */
     LCD_FillRect(0U, MENU_Y0, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - MENU_Y0), COLOR_BG);
 
-    LCD_DrawString(8U, (uint16_t)(MENU_Y0 + 4U), scr->title, COLOR_TEXT, COLOR_BG, TEXT_SCALE);
+    /* عنوان روی نوار رنگی */
+    LCD_FillRect(0U, MENU_Y0, LCD_WIDTH, ROW_HEIGHT - 1U, th->accent);
+    LCD_DrawString(8U, (uint16_t)(MENU_Y0 + 2U), scr->title, COLOR_TEXT, th->accent, TEXT_SCALE);
 
     uint16_t y = (uint16_t)(MENU_Y0 + ROW_HEIGHT);
     for (uint8_t i = 0U; i < scr->count; i++)
     {
-        uint16_t bg = (i == s_cursor) ? COLOR_SEL_BG : COLOR_BG;
+        uint8_t  sel = (i == s_cursor);
+        uint16_t bg  = sel ? th->dark : COLOR_BG;
+        uint16_t fg  = sel ? COLOR_TEXT : k_itemColors[i % ITEM_COLORS];
+
         LCD_FillRect(0U, y, LCD_WIDTH, ROW_HEIGHT, bg);
-        LCD_DrawString(16U, (uint16_t)(y + 4U), scr->items[i].name, COLOR_TEXT, bg, TEXT_SCALE);
+        if (sel) LCD_FillRect(0U, y, 5U, ROW_HEIGHT, th->accent);          /* نشانه‌ی کنار آیتم انتخابی */
+        LCD_DrawString(16U, (uint16_t)(y + 4U), scr->items[i].name, fg, bg, TEXT_SCALE);
         y = (uint16_t)(y + ROW_HEIGHT);
         if (y >= LCD_HEIGHT) break;   /* صفحه پر شد */
     }

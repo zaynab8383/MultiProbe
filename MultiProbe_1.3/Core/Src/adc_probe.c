@@ -14,6 +14,10 @@ extern OPAMP_HandleTypeDef hopamp1;
 #define RATIO_PA6      6.1f    /* ⚠ فرض: 5.1K / 1K */
 #define RATIO_PA2      6.1f    /* ⚠ فرض */
 #define RATIO_PC1      6.1f    /* ⚠ فرض */
+/* ولتاژ تغذیه‌ی برد (VCC) از پایه‌ی PA2: تقسیم‌کننده‌ی 10K + 1K  =>  VCC = Vpin × 11.
+ * اگه عدد روی نوار بالا با مولتی‌متر فرق داشت، فقط همین عدد رو درست کن. */
+#define SUPPLY_DIVIDER 11.0f
+static float s_supplyScale = SUPPLY_DIVIDER;   /* با دکمه‌های بالا/پایین توی صفحه‌ی اصلی قابل تنظیمه */
 
 static uint32_t read_raw(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling)
 {
@@ -128,6 +132,16 @@ uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
 float Adc_GetPB1(void) { return (to_volt(read_raw(&hadc1, ADC_CHANNEL_5,  ADC_SAMPLETIME_64CYCLES_5)) - BIAS_PB1) * RATIO_PB1; }
 float Adc_GetPA6(void) { return to_volt(read_raw(&hadc1, ADC_CHANNEL_3,  ADC_SAMPLETIME_64CYCLES_5)) * RATIO_PA6; }
 float Adc_GetPA2(void) { return to_volt(read_raw(&hadc1, ADC_CHANNEL_14, ADC_SAMPLETIME_64CYCLES_5)) * RATIO_PA2; }
+float Adc_GetSupply(void) { return to_volt(read_raw(&hadc1, ADC_CHANNEL_14, ADC_SAMPLETIME_64CYCLES_5)) * s_supplyScale; }
+float Adc_GetSupplyScale(void) { return s_supplyScale; }
+void  Adc_AdjustSupply(float dv)
+{
+    float v = Adc_GetSupply();
+    if (v < 1.0f) return;
+    float t = v + dv;
+    if (t < 1.0f) return;
+    s_supplyScale *= t / v;
+}
 float Adc_GetPC1(void) { return to_volt(read_raw(&hadc2, ADC_CHANNEL_11, ADC_SAMPLETIME_64CYCLES_5)) * RATIO_PC1; }
 volatile uint32_t g_vrefint_raw;
 volatile float    g_vdda;

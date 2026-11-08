@@ -25,12 +25,154 @@ static void beep_ms(uint32_t ms)
 }
 
 /* ================================================================== */
-/*  Voltmeter                                                          */
+/*  Voltmeter + signal shape                                           */
+/*   بالا: ولتاژ DC + Hz و Duty ، وسط: شکل موج ، پایین: L / A / H       */
 /* ================================================================== */
+#define VM_BOX_X      4U
+#define VM_BOX_Y      98U
+#define VM_BOX_W      232U
+#define VM_BOX_H      70U
+#define VM_IX         (VM_BOX_X + 1U)
+#define VM_IY         (VM_BOX_Y + 1U)
+#define VM_IW         (VM_BOX_W - 2U)          /* 230 ستون */
+#define VM_IH         (VM_BOX_H - 2U)          /* 68 پیکسل */
+#define VM_N          2048U                    /* تعداد نمونه‌ی هر فریم */
+#define VM_TRIG_ZONE  512U                     /* ماشه توی این بخش اول دنبال لبه‌ی بالارونده می‌گرده */
+#define VM_SHOW       (VM_N - VM_TRIG_ZONE)    /* نمونه‌هایی که رسم می‌شن */
+#define VM_BG         0x0006U                  /* آبی خیلی تیره */
+#define VM_GRID       0x31A6U
+#define VM_TRACE      0xFFE0U                  /* خط زرد مثل ویدیو */
+#define VM_SIG_SPAN_V 0.8f                     /* اختلاف Hi-Lo بیشتر از این = سیگنال */
+
+static uint16_t s_vmBuf[VM_N];
+
+static float vm_counts_to_vin(uint32_t c)
+{
+    return Adc_PinToVin((float)c * 3.3f / 65535.0f);
+}
+
+static float vm_pick_scale(float vmax)
+{
+    static const float k[] = { 5.0f, 10.0f, 15.0f, 20.0f, 30.0f, 45.0f };
+    for (uint8_t i = 0U; i < (uint8_t)(sizeof(k) / sizeof(k[0])); i++)
+        if (vmax * 1.05f <= k[i]) return k[i];
+    return 45.0f;
+}
+
+static uint16_t vm_y(uint32_t counts, float vtop)
+{
+    float f = vm_counts_to_vin(counts) / vtop;
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    return (uint16_t)(VM_IY + (VM_IH - 1U) - (uint16_t)(f * (float)(VM_IH - 1U)));
+}
+
+/* پس‌زمینه‌ی [ya, yb) از ستون x، با خط‌چین شبکه */
+static void vm_col_bg(uint16_t x, uint16_t ya, uint16_t yb)
+{
+    for (uint16_t g = 1U; g < 4U; g++)
+    {
+        uint16_t gy = (uint16_t)(VM_IY + (VM_IH * g) / 4U);
+        if (gy >= ya && gy < yb)
+        {
+            if (gy > ya) LCD_FillRect(x, ya, 1U, (uint16_t)(gy - ya), VM_BG);
+            LCD_FillRect(x, gy, 1U, 1U, (x & 3U) ? VM_BG : VM_GRID);
+            ya = (uint16_t)(gy + 1U);
+        }
+    }
+    if (ya < yb) LCD_FillRect(x, ya, 1U, (uint16_t)(yb - ya), VM_BG);
+}
+
+static void vm_draw_wave(uint32_t start, float vtop)
+{
+    const uint16_t yMin = VM_IY, yMax = (uint16_t)(VM_IY + VM_IH - 1U);
+    uint16_t prevY = 0xFFFFU;
+
+    for (uint16_t cx = 0U; cx < VM_IW; cx++)
+    {
+        uint32_t a = start + ((uint32_t)cx * VM_SHOW) / VM_IW;
+        uint32_t b = start + ((uint32_t)(cx + 1U) * VM_SHOW) / VM_IW;
+        if (b <= a) b = a + 1U;
+        if (b > VM_N) b = VM_N;
+        if (a >= VM_N) a = VM_N - 1U;
+
+        uint16_t lo = 65535U, hi = 0U;
+        for (uint32_t i = a; i < b; i++)
+        {
+            if (s_vmBuf[i] < lo) lo = s_vmBuf[i];
+            if (s_vmBuf[i] > hi) hi = s_vmBuf[i];
+        }
+        uint16_t yTop = vm_y(hi, vtop);          /* ولتاژ بیشتر = y کمتر */
+        uint16_t yBot = vm_y(lo, vtop);
+        if (prevY != 0xFFFFU)                    /* لبه‌ی عمودی بین دو ستون وصل بشه */
+        {
+            if (prevY < yTop) yTop = prevY;
+            if (prevY > yBot) yBot = prevY;
+        }
+        if (yBot <= yTop)                        /* خط حداقل ۲ پیکسل ضخامت */
+        {
+            if (yBot < yMax) yBot++; else yTop--;
+        }
+        prevY = vm_y(s_vmBuf[b - 1U], vtop);
+
+        uint16_t x = (uint16_t)(VM_IX + cx);
+        vm_col_bg(x, yMin, yTop);
+        LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), VM_TRACE);
+        vm_col_bg(x, (uint16_t)(yBot + 1U), (uint16_t)(yMax + 1U));
+    }
+}
+
+/* فرکانس و duty از لبه‌های بالارونده (با هیسترزیس ۴۰٪/۶۰٪) */
+static uint8_t vm_analyze(uint16_t mn, uint16_t mx, uint32_t cyc, float *hz, float *duty)
+{
+    uint32_t hi = (uint32_t)mn + ((uint32_t)(mx - mn) * 6U) / 10U;
+    uint32_t lo = (uint32_t)mn + ((uint32_t)(mx - mn) * 4U) / 10U;
+    uint8_t  high = (s_vmBuf[0] >= hi) ? 1U : 0U;
+    uint32_t rises = 0U, first = 0U, last = 0U, hcnt = 0U, hlast = 0U;
+
+    for (uint32_t i = 1U; i < VM_N; i++)
+    {
+        uint32_t v = s_vmBuf[i];
+        if (!high && v >= hi)
+        {
+            high = 1U;
+            rises++;
+            if (rises == 1U) { first = i; hcnt = 0U; }
+            else             { last = i;  hlast = hcnt; }
+        }
+        else if (high && v <= lo)
+        {
+            high = 0U;
+        }
+        if (rises >= 1U && high) hcnt++;
+    }
+    if (rises < 2U || last <= first) return 0U;
+
+    float dt = ((float)cyc / (float)SystemCoreClock) / (float)VM_N;
+    float period_samples = (float)(last - first) / (float)(rises - 1U);
+    if (period_samples < 4.0f) return 0U;                 /* خیلی سریع: قابل اعتماد نیست */
+    *hz   = 1.0f / (period_samples * dt);
+    *duty = 100.0f * (float)hlast / (float)(last - first);
+    return 1U;
+}
+
+static void vm_fmt_time(char *dst, size_t n, float s)
+{
+    char t[12];
+    if (s < 1.0e-3f)      { UI_FmtFixed(t, sizeof t, s * 1.0e6f, 0U); snprintf(dst, n, "%sus", t); }
+    else if (s < 1.0f)    { UI_FmtFixed(t, sizeof t, s * 1.0e3f, 1U); snprintf(dst, n, "%sms", t); }
+    else                  { UI_FmtFixed(t, sizeof t, s, 1U);          snprintf(dst, n, "%ss",  t); }
+}
+
 static void App_Voltmeter(void)
 {
     UI_Begin("VOLTMETER");
-    UI_Hint("OK=zero  LEFT=reset  BACK=exit");
+    UI_Hint("OK=zero L=reset U/D=time BACK");
+    LCD_FillRect(VM_BOX_X, VM_BOX_Y, VM_BOX_W, VM_BOX_H, UI_Theme()->accent);
+    LCD_FillRect(VM_IX, VM_IY, VM_IW, VM_IH, VM_BG);
+
+    static const uint16_t k_tbUs[] = { 0U, 10U, 100U };     /* فاصله‌ی بین نمونه‌ها: سریع / ۱۰µs / ۱۰۰µs */
+    uint8_t tb = 0U;
 
     char msg[24] = "";
     uint32_t msgUntil = 0U;
@@ -53,29 +195,106 @@ static void App_Voltmeter(void)
             msgUntil = HAL_GetTick() + 1500U;
             last = 0U - 1000U;
         }
-        if (!TICK_DUE(last, 250U)) continue;
+        if (in == MENU_INPUT_UP)   { tb = (uint8_t)((tb + 1U) % 3U); last = 0U - 1000U; }
+        if (in == MENU_INPUT_DOWN) { tb = (uint8_t)((tb + 2U) % 3U); last = 0U - 1000U; }
+        if (!TICK_DUE(last, 200U)) continue;
         last = HAL_GetTick();
 
-        char v[16], b[32];
+        char t[16], b[32];
+
+        /* --- ولتاژ DC (میانگین کند و دقیق) --- */
         float vin = Adc_GetVin();
         LEDs_UpdateVoltage(vin);
+        UI_FmtFixed(t, sizeof t, vin, 2U);
+        snprintf(b, sizeof b, "%sV", t);
+        {
+            char pad[8];
+            snprintf(pad, sizeof pad, "%-6s", b);
+            LCD_DrawString(4U, 54U, pad, UI_OK, UI_BG, 3U);
+        }
 
-        UI_FmtFixed(v, sizeof v, vin, 2);
-        snprintf(b, sizeof b, "%s V", v);
-        UI_Text(4U, 56U, 3U, UI_OK, UI_BG, b);
+        /* --- نمونه‌برداری سریع از PC4 --- */
+        uint32_t gap = (SystemCoreClock / 1000000U) * k_tbUs[tb];
+        uint32_t cyc = Adc_CapturePC4(s_vmBuf, VM_N, gap);
+        if (cyc != 0U)
+        {
+            uint32_t mn = 65535U, mx = 0U, sum = 0U;
+            for (uint32_t i = 0U; i < VM_N; i++)
+            {
+                uint32_t v = s_vmBuf[i];
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+                sum += v;
+            }
+            float vLo  = vm_counts_to_vin(mn);
+            float vHi  = vm_counts_to_vin(mx);
+            float vAvg = vm_counts_to_vin(sum / VM_N);
+            uint8_t sig = ((vHi - vLo) > VM_SIG_SPAN_V) ? 1U : 0U;
 
-        UI_FmtFixed(v, sizeof v, Adc_GetPC4(), 3);
-        snprintf(b, sizeof b, "PC4  %s V", v);
-        UI_Row(3U, UI_DIM, UI_BG, b);
-        UI_FmtFixed(v, sizeof v, Adc_GetZero(), 3);
-        snprintf(b, sizeof b, "Zero %s V", v);
-        UI_Row(4U, UI_DIM, UI_BG, b);
-        UI_FmtFixed(v, sizeof v, g_vdda, 2);
-        snprintf(b, sizeof b, "VDDA %s V", v);
-        UI_Row(5U, UI_DIM, UI_BG, b);
+            /* ماشه: اولین لبه‌ی بالارونده‌ی وسط سطح */
+            uint32_t start = 0U;
+            if (sig)
+            {
+                uint32_t mid = (mn + mx) / 2U;
+                for (uint32_t i = 1U; i < VM_TRIG_ZONE; i++)
+                {
+                    if (s_vmBuf[i - 1U] < mid && s_vmBuf[i] >= mid) { start = i; break; }
+                }
+            }
 
-        UI_Row(7U, UI_TITLE, UI_BG, (HAL_GetTick() < msgUntil) ? msg : "");
+            float vtop = vm_pick_scale(vHi);
+            vm_draw_wave(start, vtop);
+            LED_Blue_Set(sig);
+
+            /* --- Hz / Duty (بالا سمت راست) --- */
+            float hz = 0.0f, duty = 0.0f;
+            uint8_t fok = sig ? vm_analyze((uint16_t)mn, (uint16_t)mx, cyc, &hz, &duty) : 0U;
+            char f7[10], d7[10];
+            if (fok)
+            {
+                if (hz < 1000.0f)       { UI_FmtFixed(t, sizeof t, hz, 0U);            snprintf(b, sizeof b, "%sHz", t); }
+                else if (hz < 1.0e6f)   { UI_FmtFixed(t, sizeof t, hz / 1000.0f, 1U);  snprintf(b, sizeof b, "%skHz", t); }
+                else                    { UI_FmtFixed(t, sizeof t, hz / 1.0e6f, 1U);   snprintf(b, sizeof b, "%sMHz", t); }
+                snprintf(f7, sizeof f7, "%-7s", b);
+                UI_FmtFixed(t, sizeof t, duty, 0U);
+                snprintf(b, sizeof b, "D%s%%", t);
+                snprintf(d7, sizeof d7, "%-7s", b);
+            }
+            else
+            {
+                snprintf(f7, sizeof f7, "%-7s", "--Hz");
+                snprintf(d7, sizeof d7, "%-7s", "D--%");
+            }
+            LCD_DrawString(136U, 52U, f7, fok ? UI_CYAN : UI_DIM, UI_BG, 2U);
+            LCD_DrawString(136U, 74U, d7, fok ? UI_ORANGE : UI_DIM, UI_BG, 2U);
+
+            /* --- L / A / H (زیر نمودار) --- */
+            UI_FmtFixed(t, sizeof t, vLo, 1U);   snprintf(b, sizeof b, "L%s", t);  snprintf(f7, sizeof f7, "%-5s", b);
+            LCD_DrawString(4U,   172U, f7, UI_CYAN,   UI_BG, 2U);
+            UI_FmtFixed(t, sizeof t, vAvg, 1U);  snprintf(b, sizeof b, "A%s", t);  snprintf(f7, sizeof f7, "%-5s", b);
+            LCD_DrawString(82U,  172U, f7, UI_WHITE,  UI_BG, 2U);
+            UI_FmtFixed(t, sizeof t, vHi, 1U);   snprintf(b, sizeof b, "H%s", t);  snprintf(f7, sizeof f7, "%-5s", b);
+            LCD_DrawString(160U, 172U, f7, UI_ORANGE, UI_BG, 2U);
+
+            /* --- خط اطلاعات ریز: PC4 ، صفر ، مقیاس ، بازه‌ی زمانی --- */
+            char s[12];
+            UI_FmtFixed(t, sizeof t, Adc_GetPC4(), 3U);
+            snprintf(b, sizeof b, "PC4 %s", t);   snprintf(s, sizeof s, "%-10s", b);
+            LCD_DrawString(4U, 196U, s, UI_CYAN, UI_BG, 1U);
+            UI_FmtFixed(t, sizeof t, Adc_GetZero(), 3U);
+            snprintf(b, sizeof b, "Z %s", t);     snprintf(s, sizeof s, "%-8s", b);
+            LCD_DrawString(78U, 196U, s, UI_ORANGE, UI_BG, 1U);
+            UI_FmtFixed(t, sizeof t, vtop, 0U);
+            snprintf(b, sizeof b, "0-%sV", t);    snprintf(s, sizeof s, "%-6s", b);
+            LCD_DrawString(138U, 196U, s, UI_DIM, UI_BG, 1U);
+            vm_fmt_time(b, sizeof b, ((float)cyc / (float)SystemCoreClock) / (float)VM_N * (float)VM_SHOW);
+            snprintf(s, sizeof s, "%-8s", b);
+            LCD_DrawString(184U, 196U, s, UI_MAGENTA, UI_BG, 1U);
+        }
+
+        UI_Text(4U, 207U, 2U, UI_TITLE, UI_BG, (HAL_GetTick() < msgUntil) ? msg : "");
     }
+    LED_Blue_Set(0);
     LEDs_AllOff();
 }
 
@@ -152,7 +371,7 @@ static void App_Ohmmeter(void)
         UI_Row(4U, UI_FG, UI_BG, b);
         UI_FmtFixed(t, sizeof t, vp, 3);
         snprintf(b, sizeof b, "Vpin %s V", t);
-        UI_Row(5U, UI_DIM, UI_BG, b);
+        UI_Row(5U, UI_CYAN, UI_BG, b);
     }
     Probe_OhmOff();
 }
@@ -255,11 +474,11 @@ static void App_Pwm(void)
             {
                 UI_FmtFixed(t1, sizeof t1, s.duty_pct, 1);
                 snprintf(b, sizeof b, "Duty %s %%", t1);
-                UI_Row(6U, UI_FG, UI_BG, b);
+                UI_Row(6U, UI_ORANGE, UI_BG, b);
                 if (s.freq_ok)       snprintf(b, sizeof b, "Freq %lu Hz", (unsigned long)s.freq_hz);
                 else if (s.too_fast) snprintf(b, sizeof b, "Freq too high");
                 else                 snprintf(b, sizeof b, "Freq ---");
-                UI_Row(7U, UI_FG, UI_BG, b);
+                UI_Row(7U, UI_CYAN, UI_BG, b);
                 UI_Row(8U, 0x07FFU, UI_BG, "SIGNAL");     /* cyan/blue indicator */
             }
             else
@@ -315,9 +534,9 @@ static void App_Dac(void)
             snprintf(b, sizeof b, "Out %s V", t);                            UI_Row(2U, UI_FG, UI_BG, b);
             snprintf(b, sizeof b, "Switch %s", on[ch] ? "ON" : "OFF");       UI_Row(3U, on[ch] ? UI_OK : UI_FG, UI_BG, b);
             UI_FmtFixed(t, sizeof t, Probe_ReadVolts(RD_PB1), 2);
-            snprintf(b, sizeof b, "PB1 %s V", t);                            UI_Row(5U, UI_DIM, UI_BG, b);
+            snprintf(b, sizeof b, "PB1 %s V", t);                            UI_Row(5U, UI_CYAN, UI_BG, b);
             UI_FmtFixed(t, sizeof t, Probe_ReadVolts(RD_PA6), 2);
-            snprintf(b, sizeof b, "PA6 %s V", t);                            UI_Row(6U, UI_DIM, UI_BG, b);
+            snprintf(b, sizeof b, "PA6 %s V", t);                            UI_Row(6U, UI_ORANGE, UI_BG, b);
         }
     }
     Probe_DacOff();
@@ -368,7 +587,7 @@ static void App_GpioTest(void)
                 char b[32];
                 GPIO_PinState st = HAL_GPIO_ReadPin(k_testPins[i].port, k_testPins[i].pin);
                 snprintf(b, sizeof b, "%s %s", k_testPins[i].name, (st == GPIO_PIN_SET) ? "H" : "L");
-                UI_Row(i, UI_FG, (i == sel) ? UI_SEL_BG : UI_BG, b);
+                UI_Row(i, (st == GPIO_PIN_SET) ? UI_OK : UI_FG, (i == sel) ? UI_SEL_BG : UI_BG, b);
             }
         }
         if (TICK_DUE(last, 300U))
@@ -438,9 +657,11 @@ static void App_KeyTest(void)
 static void App_LedTest(void)
 {
     UI_Begin("LED TEST");
-    UI_Row(0U, UI_FG, UI_BG, "yellow blue green red");
+    static const char *const names[4] = { "yellow", "blue", "green", "red" };
+    static const uint16_t cols[4]     = { 0xFFE0U, 0x041FU, 0x07E0U, 0xF800U };
     for (uint8_t i = 0U; i < 4U; i++)
     {
+        UI_Row(0U, cols[i], UI_BG, names[i]);
         LEDs_AllOff();
         LEDs_Set(i, 1U);
         HAL_Delay(500);
@@ -533,13 +754,14 @@ static void App_Scope(void)
 static void App_ComingSoon(uint8_t idx)
 {
     LEDs_AllOff();
-    LCD_FillRect(0U, 24U, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - 24U), 0xFFFFU);
+    const UiTheme_t *th = UI_Theme();
+    LCD_FillRect(0U, 24U, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - 24U), th->bg);
     const PageTitle_t *t = &g_pageTitles[idx];
-    LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - t->w) / 2U), 44U, t->w, t->h, t->bits, 0x7945U, 0xFFFFU);
-    LCD_DrawBitmap1bpp((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, PAGE_ICON_W, PAGE_ICON_H, g_pageIcons[idx].bits, 0xA828U, 0xFFFFU);
+    LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - t->w) / 2U), 44U, t->w, t->h, t->bits, th->dark, th->bg);
+    LCD_DrawBitmap1bpp((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, PAGE_ICON_W, PAGE_ICON_H, g_pageIcons[idx].bits, th->accent, th->bg);
     const PageTitle_t *c = &g_pageTitles[TITLE_COMING_SOON];
-    LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - c->w) / 2U), 192U, c->w, c->h, c->bits, 0xA828U, 0xFFFFU);
-    LCD_DrawString(78U, 218U, "Coming soon", 0x7BEFU, 0xFFFFU, 1U);
+    LCD_DrawBitmap1bpp((uint16_t)((LCD_WIDTH - c->w) / 2U), 192U, c->w, c->h, c->bits, th->accent, th->bg);
+    LCD_DrawString(78U, 218U, "Coming soon", th->dark, th->bg, 1U);
     for (;;)
     {
         if (UI_Poll() == MENU_INPUT_BACK) break;
@@ -590,6 +812,7 @@ static void App_SensorSim(void) { RunSubMenu(&s_simScreen); }
 /* ================================================================== */
 void App_RunPage(uint8_t idx)
 {
+    UI_SetTheme(idx);          /* every screen opened from this page uses its color */
     switch (idx)
     {
     case 1: App_Tests();     break;

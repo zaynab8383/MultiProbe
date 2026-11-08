@@ -56,4 +56,8 @@ void LCD_DrawString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t
 void LCD_DrawBitmap1bpp(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                         const uint8_t *bits, uint16_t fg, uint16_t bg);
 
+/* Draw an RLE4 image: byte = ((run-1)<<4) | palette_index, row-major, w*h pixels. */
+void LCD_DrawRLE4(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                  const uint8_t *rle, uint16_t len, const uint16_t *pal);
+
 #endif /* INC_LCD_H */

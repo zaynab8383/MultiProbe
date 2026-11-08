@@ -9,11 +9,53 @@
 #define FONT_CELL_H   10U
 #define ROW_Y0        50U
 #define ROW_PITCH     20U
+#define TITLE_BAND_H  23U
+
+/* ---- themes: one per home page (same order as the carousel) -------- */
+#define C565(r,g,b)  ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | (((b) & 0xF8) >> 3)))
+#define MIXW(v,p)    ((v) + ((255 - (v)) * (p)) / 100)      /* toward white */
+#define MIXK(v,p)    (((v) * (100 - (p))) / 100)            /* toward black */
+#define THEME(r,g,b) { C565(r,g,b),                                              \
+                       C565(MIXW(r,88), MIXW(g,88), MIXW(b,88)),                 \
+                       C565(MIXK(r,55), MIXK(g,55), MIXK(b,55)),                 \
+                       C565(MIXW(r,60), MIXW(g,60), MIXW(b,60)) }
+
+static const UiTheme_t k_themes[UI_THEME_COUNT] = {
+    THEME( 30, 110, 230),   /* 0 Dashboard       blue    */
+    THEME(240, 130,  20),   /* 1 Tests           orange  */
+    THEME(150,  70, 210),   /* 2 Logic Analyzer  purple  */
+    THEME( 30, 170,  80),   /* 3 Voltmeter       green   */
+    THEME(  0, 160, 170),   /* 4 Sensor Sim      teal    */
+    THEME(225,  50,  60),   /* 5 Oscilloscope    red     */
+    THEME(220,  60, 160),   /* 6 Ohmmeter        pink    */
+    THEME(210, 150,   0),   /* 7 Buzzer          amber   */
+    THEME( 70,  80, 200),   /* 8 ECU Flash       indigo  */
+};
+
+static uint8_t s_theme = 0U;
+
+const UiTheme_t *UI_ThemeOf(uint8_t idx)
+{
+    return &k_themes[(idx < UI_THEME_COUNT) ? idx : 0U];
+}
+
+const UiTheme_t *UI_Theme(void)
+{
+    return &k_themes[s_theme];
+}
+
+void UI_SetTheme(uint8_t idx)
+{
+    s_theme = (idx < UI_THEME_COUNT) ? idx : 0U;
+    StatusBar_SetColor(k_themes[s_theme].dark);   /* redraws only if the color changed */
+}
 
 void UI_Begin(const char *title)
 {
+    const UiTheme_t *t = UI_Theme();
     LCD_FillRect(0U, STATUSBAR_H_PX, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - STATUSBAR_H_PX), UI_BG);
-    UI_Text(4U, (uint16_t)(STATUSBAR_H_PX + 3U), 2U, UI_TITLE, UI_BG, title);
+    LCD_FillRect(0U, STATUSBAR_H_PX, LCD_WIDTH, TITLE_BAND_H, t->accent);
+    UI_Text(6U, (uint16_t)(STATUSBAR_H_PX + 2U), 2U, UI_WHITE, t->accent, title);
 }
 
 MenuInput_t UI_Poll(void)
