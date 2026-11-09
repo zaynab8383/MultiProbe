@@ -2,6 +2,7 @@
 #include "lcd.h"
 #include "keypad.h"
 #include "statusbar.h"
+#include "pages_assets.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -29,7 +30,8 @@ static const UiTheme_t k_themes[UI_THEME_COUNT] = {
     THEME(225,  50,  60),   /* 5 Oscilloscope    red     */
     THEME(220,  60, 160),   /* 6 Ohmmeter        pink    */
     THEME(210, 150,   0),   /* 7 Buzzer          amber   */
-    THEME( 70,  80, 200),   /* 8 ECU Flash       indigo  */
+    THEME(120, 170,  20),   /* 8 Wiring Test     lime    */
+    THEME( 70,  80, 200),   /* 9 ECU Flash       indigo  */
 };
 
 static uint8_t s_theme = 0U;
@@ -42,6 +44,15 @@ const UiTheme_t *UI_ThemeOf(uint8_t idx)
 const UiTheme_t *UI_Theme(void)
 {
     return &k_themes[s_theme];
+}
+
+void UI_DrawPageIcon(uint16_t x, uint16_t y, uint8_t idx)
+{
+    uint16_t pal[16];
+    const UiTheme_t *t = UI_ThemeOf(idx);
+    for (uint8_t i = 0U; i < 16U; i++) pal[i] = g_iconPalette[i];
+    pal[0] = t->bg; pal[1] = t->accent; pal[2] = t->dark;
+    LCD_DrawRLE4(x, y, PAGE_ICON_W, PAGE_ICON_H, g_pageIcons[idx].rle, g_pageIcons[idx].len, pal);
 }
 
 void UI_SetTheme(uint8_t idx)

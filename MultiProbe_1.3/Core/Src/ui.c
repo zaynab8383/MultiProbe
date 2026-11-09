@@ -30,7 +30,8 @@ static const UiTheme_t k_themes[UI_THEME_COUNT] = {
     THEME(225,  50,  60),   /* 5 Oscilloscope    red     */
     THEME(220,  60, 160),   /* 6 Ohmmeter        pink    */
     THEME(210, 150,   0),   /* 7 Buzzer          amber   */
-    THEME( 70,  80, 200),   /* 8 ECU Flash       indigo  */
+    THEME(120, 170,  20),   /* 8 Wiring Test     lime    */
+    THEME( 70,  80, 200),   /* 9 ECU Flash       indigo  */
 };
 
 static uint8_t s_theme = 0U;

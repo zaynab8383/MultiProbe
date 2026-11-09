@@ -23,6 +23,7 @@ void  Probe_PwmStop(void);
 
 /* نمونه‌برداری سریع و استخراج مشخصات سیگنال (~۲۰ms بلاک می‌شه) */
 void  Probe_Measure(ReadSrc_t src, SigStat_t *out);
+void  Probe_MeasureGap(ReadSrc_t src, SigStat_t *out, uint32_t gap_cycles);   /* با فاصله‌ی اضافه بین نمونه‌ها (برای فرکانس‌های پایین) */
 const char *Probe_ReadName(ReadSrc_t src);
 uint32_t Probe_Capture(ReadSrc_t src, uint16_t *dst, uint32_t n);   /* CPU cycles taken, 0 = error */
 float Probe_CountsToVolts(ReadSrc_t src, uint32_t counts);
@@ -31,6 +32,9 @@ float Probe_ReadVolts(ReadSrc_t src);         /* ولتاژ DC (میانگین)�
 /* اهم‌متر */
 void  Probe_OhmSelect(uint8_t range);         /* فقط سوئیچ range فعال */
 void  Probe_OhmOff(void);
+void  Probe_P1PullUp(uint8_t on);             /* پول‌آپ 10k روی Probe1 (3.3V) ، بدون دست‌زدن به Probe2 (برای تست سیم‌کشی) */
+void  Probe_SwFlipPolarity(void);             /* سطح فعال SEL ها رو برعکس می‌کنه */
+uint8_t Probe_SwActiveHigh(void);             /* 1 = سوئیچ‌ها با HIGH روشن می‌شن */
 
 /* DAC */
 void  Probe_DacSwitch(uint8_t ch, uint8_t on);   /* ch = 1 یا 2 */

@@ -18,7 +18,7 @@ static const UiTheme_t *s_t;
 
 static const char *const k_sub[CAROUSEL_PAGES] = {
     "Dashboard", "Tests", "Logic Analyzer", "Voltmeter", "Sensor Simulator",
-    "Oscilloscope", "Ohmmeter", "Buzzer", "ECU Flash"
+    "Oscilloscope", "Ohmmeter", "Buzzer", "Wiring Test", "ECU Flash"
 };
 
 static uint8_t s_cur   = 0U;

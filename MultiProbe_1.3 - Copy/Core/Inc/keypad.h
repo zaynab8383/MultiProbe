@@ -4,6 +4,7 @@
 #include "menu.h"
 
 void Keypad_Init(void);
+void Keypad_Tick(void);          /* از SysTick صدا زده می‌شه */
 MenuInput_t Keypad_Poll(void);   /* اگه دکمه‌ای فشرده نشده، MENU_INPUT_NONE برمی‌گردونه */
 
 uint8_t Keypad_RawPressed(MenuInput_t key);

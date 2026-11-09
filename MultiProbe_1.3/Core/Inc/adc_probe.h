@@ -13,6 +13,7 @@ float Adc_GetVin(void);   /* ولتاژ ورودی با تصحیح صفر */
 float Adc_GetZero(void);
 void  Adc_ResetZero(void);
 uint8_t Adc_CalibrateZero(void);   /* ولتاژ واقعی ورودی دستگاه (از PC4، خروجی OPAMP) */
+float Adc_GetProbe1Dc(void);   /* ولتاژ DC واقعی روی Probe1 (از PB0 بدون آفست OPAMP ، با ضریب تقسیم) */
 float Adc_GetPB0(void);   /* ولتاژ تقسیم‌شده قبل از بافر، ADC1_IN9 */
 float Adc_GetPC4(void);   /* خروجی OPAMP1، ADC1_IN4 */
 float Adc_GetPB1(void);   /* ADC1_IN5، خروجی U7A، بعد از کم کردن آفست */

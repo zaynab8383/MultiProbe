@@ -19,15 +19,31 @@ static const OhmRange_t k_ohm[OHM_RANGES] = OHM_RANGE_TABLE;
 static uint16_t s_buf[BURST_N];
 
 static uint8_t s_pwmOn = 0U;
+static uint8_t s_ohmGnd = 0U;      /* 1 = Probe2 برای اهم‌متر روی 0V نگه داشته شده */
+
+static void ohm_gnd_off(void);
 
 static void oe(GPIO_TypeDef *port, uint16_t pin, uint8_t enable)
 {
     HAL_GPIO_WritePin(port, pin, enable ? GPIO_PIN_RESET : GPIO_PIN_SET);   /* فعال-پایین */
 }
 
+/* سطح فعال سوئیچ‌های SEL (PE11, PB10, PE15, PE14). پیش‌فرض از board_map.h ؛ اهم‌متر می‌تونه عوضش کنه */
+static GPIO_PinState s_swActive = SW_ACTIVE_LEVEL;
+
 static void sw(GPIO_TypeDef *port, uint16_t pin, uint8_t on)
 {
-    HAL_GPIO_WritePin(port, pin, on ? SW_ACTIVE_LEVEL : SW_IDLE_LEVEL);
+    GPIO_PinState idle = (s_swActive == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+    HAL_GPIO_WritePin(port, pin, on ? s_swActive : idle);
+}
+
+uint8_t Probe_SwActiveHigh(void) { return (s_swActive == GPIO_PIN_SET) ? 1U : 0U; }
+
+void Probe_SwFlipPolarity(void)
+{
+    s_swActive = (s_swActive == GPIO_PIN_SET) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+    Probe_DacSwitch(1U, 0U);                        /* سوئیچ‌های DAC هم با سطح جدید خاموش بشن */
+    Probe_DacSwitch(2U, 0U);
 }
 
 
@@ -78,6 +94,7 @@ void Probe_AllOff(void)
 
 void Probe_PwmStart(ProbeId_t p, uint32_t f, uint8_t duty)
 {
+    ohm_gnd_off();                                  /* PE4 باید پایه‌ی تایمر باشه */
     if (f < 1U)      f = 1U;
     if (f > 200000U) f = 200000U;
     if (duty > 100U) duty = 100U;
@@ -177,7 +194,7 @@ float Probe_CountsToVolts(ReadSrc_t src, uint32_t counts)
     return (float)counts * 3.3f / 65535.0f * ratio;
 }
 
-void Probe_Measure(ReadSrc_t src, SigStat_t *o)
+void Probe_MeasureGap(ReadSrc_t src, SigStat_t *o, uint32_t gap_cycles)
 {
     ADC_HandleTypeDef *h; uint32_t ch; float ratio;
     src_info(src, &h, &ch, &ratio);
@@ -199,6 +216,11 @@ void Probe_Measure(ReadSrc_t src, SigStat_t *o)
             s_buf[i] = (uint16_t)HAL_ADC_GetValue(h);
         else
             s_buf[i] = (i > 0U) ? s_buf[i - 1U] : 0U;
+        if (gap_cycles != 0U)
+        {
+            uint32_t tg = DWT->CYCCNT;
+            while ((DWT->CYCCNT - tg) < gap_cycles) { }
+        }
     }
     uint32_t cyc = DWT->CYCCNT - t0;
     HAL_ADC_Stop(h);
@@ -253,16 +275,67 @@ void Probe_Measure(ReadSrc_t src, SigStat_t *o)
     }
 }
 
+void Probe_Measure(ReadSrc_t src, SigStat_t *o)
+{
+    Probe_MeasureGap(src, o, 0U);
+}
+
 /* ---------------- اهم‌متر ---------------- */
+
+/* اهم‌متر: Probe2 باید 0V باشه (مرجع GND).
+ *   PE4 (TIM15_CH1N) موقتاً GPIO خروجی LOW می‌شه  -> ورودی A3 از 74HC125 = 0
+ *   PA3 (OE3) = LOW                                -> بافر Y3 فعال، Probe2 = 0V
+ * موقع خروج هر دو برمی‌گردن به حالت عادی (PE4 دوباره پایه‌ی PWM، PA3 = HIGH = خاموش). */
+static void ohm_gnd_on(void)
+{
+    if (s_ohmGnd) return;
+    Probe_PwmStop();                               /* تایمر قطع + هر دو OE خاموش */
+
+    GPIO_InitTypeDef gi = {0};
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_4, GPIO_PIN_RESET);   /* اول LOW بشه بعد خروجی */
+    gi.Pin   = GPIO_PIN_4;
+    gi.Mode  = GPIO_MODE_OUTPUT_PP;
+    gi.Pull  = GPIO_NOPULL;
+    gi.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOE, &gi);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_4, GPIO_PIN_RESET);
+
+    oe(OE_P2_PORT, OE_P2_PIN, 1U);                 /* PA3 = LOW */
+    s_ohmGnd = 1U;
+}
+
+static void ohm_gnd_off(void)
+{
+    if (!s_ohmGnd) return;
+    oe(OE_P2_PORT, OE_P2_PIN, 0U);                 /* PA3 = HIGH */
+
+    GPIO_InitTypeDef gi = {0};
+    gi.Pin       = GPIO_PIN_4;                     /* PE4 دوباره TIM15_CH1N */
+    gi.Mode      = GPIO_MODE_AF_PP;
+    gi.Pull      = GPIO_NOPULL;
+    gi.Speed     = GPIO_SPEED_FREQ_LOW;
+    gi.Alternate = GPIO_AF4_TIM15;
+    HAL_GPIO_Init(GPIOE, &gi);
+    s_ohmGnd = 0U;
+}
 
 void Probe_OhmOff(void)
 {
     for (uint8_t i = 0U; i < OHM_RANGES; i++)
         sw(k_ohm[i].port, k_ohm[i].pin, 0U);
+    ohm_gnd_off();
+}
+
+void Probe_P1PullUp(uint8_t on)
+{
+    sw(k_ohm[0].port, k_ohm[0].pin, 0U);            /* رنج 1k خاموش */
+    sw(k_ohm[OHM_RANGES - 1U].port, k_ohm[OHM_RANGES - 1U].pin, on ? 1U : 0U);   /* رنج 10k */
 }
 
 void Probe_OhmSelect(uint8_t range)
 {
+    ohm_gnd_on();                                  /* فقط اهم‌متر: Probe2 = 0V */
     for (uint8_t i = 0U; i < OHM_RANGES; i++)
         sw(k_ohm[i].port, k_ohm[i].pin, (i == range) ? 1U : 0U);
 }

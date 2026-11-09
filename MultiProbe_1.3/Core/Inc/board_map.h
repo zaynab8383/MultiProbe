@@ -25,14 +25,13 @@
 
 /* ------------------------------------------------------------------ */
 /* ۲) سوئیچ‌های آنالوگ (PE11, PB10 = DAC ؛ PE15, PE14 = اهم‌متر)         */
-/*    ⚠ سطح فعال معلوم نیست. حالت بیکار = همون سطحی که کد قبلی از بوت    */
-/*    می‌ذاشت (HIGH). اگه برعکس بود فقط این دو خط رو عوض کن.            */
+/*    طبق جدول مهندس برد (ستون SEL ACTIVE = NOT) همه‌ی SEL ها active-low    */
+/*    هستن: LOW = سوئیچ روشن ، HIGH = خاموش (همون حالتی که CubeMX از بوت   */
+/*    می‌ذاره). قبلاً برعکس تعریف شده بود و اهم‌متر رنج رو وارونه می‌زد.    */
 /*    صفحه‌ی "GPIO Test" توی منو برای تست همین موضوع است.               */
 /* ------------------------------------------------------------------ */
-//#define SW_IDLE_LEVEL    GPIO_PIN_SET
-//#define SW_ACTIVE_LEVEL  GPIO_PIN_RESET
-#define SW_IDLE_LEVEL    GPIO_PIN_RESET
-#define SW_ACTIVE_LEVEL  GPIO_PIN_SET
+#define SW_IDLE_LEVEL    GPIO_PIN_SET
+#define SW_ACTIVE_LEVEL  GPIO_PIN_RESET
 #define SW_DAC1_PORT GPIOE   /* PE11 -> R23 -> Q1,Q2,Q3  (⚠ فرض: مسیر DAC کانال ۱) */
 #define SW_DAC1_PIN  GPIO_PIN_11
 #define SW_DAC2_PORT GPIOB   /* PB10 -> R46 -> Q4,Q5,Q6  (⚠ فرض: مسیر DAC کانال ۲) */
@@ -63,6 +62,9 @@ typedef struct {
 }
 /* ولتاژ پایه‌ی ADC با Rx = ∞ نباید بالاتر از این بشه؛ بالاتر = "OPEN" */
 #define OHM_OPEN_FRACTION  0.985f
+/* مقاومت سری مسیر Probe2 تا GND (R35 = 100Ω + مقاومت خروجی 74HC125 ≈ 30Ω).
+ * این مقدار از نتیجه کم می‌شه. با دکمه‌ی OK توی صفحه‌ی اهم‌متر (پروب‌ها اتصال کوتاه) دقیق‌تر می‌شه. */
+#define OHM_SERIES_DEFAULT 130.0f
 
 /* ------------------------------------------------------------------ */
 /* ۴) خوندن PWM: کدوم پایه‌ی ADC سیگنال پروب رو می‌بینه                 */

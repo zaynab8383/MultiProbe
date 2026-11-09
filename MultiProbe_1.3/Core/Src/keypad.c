@@ -52,9 +52,14 @@ void Keypad_Init(void)
     s_ready = 1U;
 }
 
+/* اگه دکمه‌ی Up (PB3) روی برد کار نکنه: Down رو >۶۰۰ms نگه دار = Up
+ * (فشردن کوتاه Down = Down، موقع رها کردن شناخته می‌شه) */
+#define LONG_DOWN_MS 600U
+
 void Keypad_Tick(void)          /* از SysTick_Handler صدا زده می‌شه */
 {
     static uint32_t lastPoll = 0U;
+    static uint32_t downAt = 0U;
     if (!s_ready) return;
     if ((HAL_GetTick() - lastPoll) < 20U) return;
     lastPoll = HAL_GetTick();
@@ -62,15 +67,18 @@ void Keypad_Tick(void)          /* از SysTick_Handler صدا زده می‌ش�
     for (uint8_t i = 0U; i < KEY_COUNT; i++)
     {
         GPIO_PinState st = HAL_GPIO_ReadPin(s_keys[i].port, s_keys[i].pin);
+        uint8_t isDown = (s_keys[i].input == MENU_INPUT_DOWN);
 
         if (s_lastHigh[i] && st == GPIO_PIN_RESET)
         {
             s_lastHigh[i] = 0U;
-            kq_push(s_keys[i].input);
+            if (isDown) downAt = lastPoll;
+            else        kq_push(s_keys[i].input);
         }
-        if (st == GPIO_PIN_SET)
+        else if (!s_lastHigh[i] && st == GPIO_PIN_SET)
         {
             s_lastHigh[i] = 1U;
+            if (isDown) kq_push(((lastPoll - downAt) >= LONG_DOWN_MS) ? MENU_INPUT_UP : MENU_INPUT_DOWN);
         }
     }
 }

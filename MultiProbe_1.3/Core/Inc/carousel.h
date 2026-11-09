@@ -4,7 +4,7 @@
 
 /* Home screen: one full-screen page per feature (icon + Persian title).
  * LEFT / RIGHT = previous / next page, ENTER = open the page. */
-#define CAROUSEL_PAGES  9U
+#define CAROUSEL_PAGES  10U
 
 void Carousel_Init(void);
 void Carousel_HandleInput(MenuInput_t in);

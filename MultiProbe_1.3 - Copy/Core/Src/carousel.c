@@ -3,6 +3,8 @@
 #include "lcd.h"
 #include "statusbar.h"
 #include "ui.h"
+#include "adc_probe.h"
+#include <stdio.h>
 
 /* رنگ‌ها از تم همین صفحه می‌آد (ui.c) */
 static const UiTheme_t *s_t;
@@ -16,7 +18,7 @@ static const UiTheme_t *s_t;
 
 static const char *const k_sub[CAROUSEL_PAGES] = {
     "Dashboard", "Tests", "Logic Analyzer", "Voltmeter", "Sensor Simulator",
-    "Oscilloscope", "Ohmmeter", "Buzzer", "ECU Flash"
+    "Oscilloscope", "Ohmmeter", "Buzzer", "Wiring Test", "ECU Flash"
 };
 
 static uint8_t s_cur   = 0U;
@@ -91,8 +93,7 @@ void Carousel_DrawPage(uint8_t idx)
                        (uint16_t)(40U + (32U - t->h) / 2U),
                        t->w, t->h, t->bits, COL_TITLE, COL_BG);
 
-    LCD_DrawBitmap1bpp((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, PAGE_ICON_W, PAGE_ICON_H,
-                       g_pageIcons[idx].bits, COL_LINE, COL_BG);
+    UI_DrawPageIcon((LCD_WIDTH - PAGE_ICON_W) / 2U, 84U, idx);
 
     draw_text_center(190U, k_sub[idx], COL_SUB);
 }
@@ -134,7 +135,17 @@ void Carousel_HandleInput(MenuInput_t in)
         App_RunPage(s_cur);
         s_dirty = 1U;
         break;
+    case MENU_INPUT_UP:
+    case MENU_INPUT_DOWN:
+    {   /* کالیبراسیون ولتاژ تغذیه‌ی نوار بالا: ±0.1 ولت تا با مولتی‌متر یکی بشه */
+        char t[12], b[24];
+        Adc_AdjustSupply((in == MENU_INPUT_UP) ? 0.1f : -0.1f);
+        UI_FmtFixed(t, sizeof t, Adc_GetSupplyScale(), 2U);
+        snprintf(b, sizeof b, "SUPPLY K=%s   ", t);
+        draw_text_center(220U, b, COL_SUB);
+        break;
+    }
     default:
-        break;          /* UP / DOWN / BACK: nothing on the home screen */
+        break;          /* BACK: nothing on the home screen */
     }
 }

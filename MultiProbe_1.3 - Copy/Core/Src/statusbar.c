@@ -6,7 +6,7 @@
 #include <string.h>
 
 /* منبع ولتاژی که نشون داده می‌شه:
- *   0 = ولتاژ ورودی/تغذیه‌ی اندازه‌گیری‌شده روی پروب (Adc_GetVin، همونی که LED ها نشون می‌دن)
+ *   0 = ولتاژ تغذیه‌ی برد (VCC) از پایه‌ی PA2 (Adc_GetSupply)
  *   1 = VDDA یعنی ریل ۳.۳ ولت خود برد (از VREFINT) */
 #define STATUSBAR_SHOW_VDDA   0
 
@@ -46,7 +46,7 @@ static float read_supply(void)
     Adc_SelfTest();
     return g_vdda;
 #else
-    return Adc_GetVin();
+    return Adc_GetSupply();
 #endif
 }
 

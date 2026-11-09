@@ -18,6 +18,21 @@ static const KeyDef_t s_keys[] = {
 
 static uint8_t s_lastHigh[KEY_COUNT];
 
+/* صف کوچک رویدادها: دکمه توی SysTick (هر ۱ms) اسکن می‌شه، پس وسط کارهای طولانی
+ * (مثل رسم نمودار) هم فشردن دکمه گم نمی‌شه */
+#define KQ_SIZE 8U
+static volatile MenuInput_t s_q[KQ_SIZE];
+static volatile uint8_t     s_qh = 0U, s_qt = 0U;
+static volatile uint8_t     s_ready = 0U;
+
+static void kq_push(MenuInput_t in)
+{
+    uint8_t n = (uint8_t)((s_qh + 1U) % KQ_SIZE);
+    if (n == s_qt) return;
+    s_q[s_qh] = in;
+    s_qh = n;
+}
+
 void Keypad_Init(void)
 {
     __HAL_RCC_GPIOB_CLK_ENABLE();
@@ -34,29 +49,46 @@ void Keypad_Init(void)
         HAL_GPIO_Init(s_keys[i].port, &gi);
         s_lastHigh[i] = 1U;
     }
+    s_ready = 1U;
 }
 
-MenuInput_t Keypad_Poll(void)
+/* اگه دکمه‌ی Up (PB3) روی برد کار نکنه: Down رو >۶۰۰ms نگه دار = Up
+ * (فشردن کوتاه Down = Down، موقع رها کردن شناخته می‌شه) */
+#define LONG_DOWN_MS 600U
+
+void Keypad_Tick(void)          /* از SysTick_Handler صدا زده می‌شه */
 {
     static uint32_t lastPoll = 0U;
-    if ((HAL_GetTick() - lastPoll) < 20U) return MENU_INPUT_NONE;
+    static uint32_t downAt = 0U;
+    if (!s_ready) return;
+    if ((HAL_GetTick() - lastPoll) < 20U) return;
     lastPoll = HAL_GetTick();
 
     for (uint8_t i = 0U; i < KEY_COUNT; i++)
     {
         GPIO_PinState st = HAL_GPIO_ReadPin(s_keys[i].port, s_keys[i].pin);
+        uint8_t isDown = (s_keys[i].input == MENU_INPUT_DOWN);
 
         if (s_lastHigh[i] && st == GPIO_PIN_RESET)
         {
             s_lastHigh[i] = 0U;
-            return s_keys[i].input;
+            if (isDown) downAt = lastPoll;
+            else        kq_push(s_keys[i].input);
         }
-        if (st == GPIO_PIN_SET)
+        else if (!s_lastHigh[i] && st == GPIO_PIN_SET)
         {
             s_lastHigh[i] = 1U;
+            if (isDown) kq_push(((lastPoll - downAt) >= LONG_DOWN_MS) ? MENU_INPUT_UP : MENU_INPUT_DOWN);
         }
     }
-    return MENU_INPUT_NONE;
+}
+
+MenuInput_t Keypad_Poll(void)
+{
+    if (s_qt == s_qh) return MENU_INPUT_NONE;
+    MenuInput_t in = s_q[s_qt];
+    s_qt = (uint8_t)((s_qt + 1U) % KQ_SIZE);
+    return in;
 }
 
 /* 1 while the given key is held down (active low) -- used by the key test page */

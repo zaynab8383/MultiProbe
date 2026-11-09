@@ -673,6 +673,33 @@ void LCD_DrawBitmap1bpp(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
     }
 }
 
+void LCD_DrawRLE4(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                  const uint8_t *rle, uint16_t len, const uint16_t *pal)
+{
+    if (w == 0U || h == 0U) return;
+    if ((uint32_t)x + w > LCD_WIDTH || (uint32_t)y + h > LCD_HEIGHT) return;
+
+    LCD_Select();
+    LCD_SetWindow(x, y, (uint16_t)(x + w - 1U), (uint16_t)(y + h - 1U));
+    LCD_WriteCommand(0x2C);
+    LCD_DC_Data();
+
+    uint32_t total = (uint32_t)w * h;
+    for (uint16_t i = 0U; i < len && total != 0U; i++)
+    {
+        uint16_t c  = pal[rle[i] & 0x0FU];
+        uint32_t n  = (uint32_t)(rle[i] >> 4) + 1U;
+        if (n > total) n = total;
+        total -= n;
+        const uint8_t ch = (uint8_t)(c >> 8), cl = (uint8_t)c;
+        while (n--)
+        {
+            FMC_Write8(LCD_DATA_ADDR, ch);
+            FMC_Write8(LCD_DATA_ADDR, cl);
+        }
+    }
+}
+
 void LCD_MPU_Config(void)
 {
     MPU_Region_InitTypeDef mpu = {0};
