@@ -1213,7 +1213,7 @@ static void App_WiringTest(void)
         if (prev == WT_OK && st != WT_OK && drops < 9999U) drops++;   /* قطع‌ووصل لحظه‌ای */
         prev = st;
         LED_Blue_Set(st == WT_OK);
-        wt_buzzer((uint8_t)(snd && st == WT_OK));              /* بوق ممتد = سیگنال می‌رسه (چشم لازم نیست) */
+        wt_buzzer((uint8_t)(snd && st != WT_OK));              /* بوق ممتد = سیگنال می‌رسه (چشم لازم نیست) */
 
         char b[32], t1[12], t2[12];
         uint16_t col = (st == WT_OK) ? UI_OK : UI_BAD;
