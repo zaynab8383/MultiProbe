@@ -994,10 +994,10 @@ static const char *const k_wtReason[] = { "match", "no signal", "weak", "irregul
 static const uint32_t    k_wtFreq[] = { 100U, 200U, 500U, 1000U, 2000U, 10000U };
 #define WT_FREQ_COUNT      ((uint8_t)(sizeof(k_wtFreq) / sizeof(k_wtFreq[0])))
 #define WT_DUTY            50U
-#define WT_MIN_SWING_V     0.8f     /* بدون مرجع: دامنه‌ی کمتر از این = ضعیف */
-#define WT_NOISE_V         0.3f     /* دامنه‌ی کمتر از این = اصلاً سیگنالی نیست */
+#define WT_MIN_SWING_V     0.3f     /* بدون مرجع: دامنه‌ی کمتر از این = ضعیف */
+#define WT_NOISE_V         0.1f     /* دامنه‌ی کمتر از این = اصلاً سیگنالی نیست */
 #define WT_REF_FRACTION    0.35f    /* با مرجع: دامنه باید حداقل این کسر از مرجع باشه */
-#define WT_PURITY_MIN      0.30f    /* سهم انرژی موج که دقیقاً روی فرکانس ارسالی ماست (نویز/سیگنال دیگه = کم) */
+#define WT_PURITY_MIN      0.25f    /* سهم انرژی موج که دقیقاً روی فرکانس ارسالی ماست (نویز/سیگنال دیگه = کم) */
 
 /* نتیجه‌ی یک اندازه‌گیری روی Probe1.
  * روش: تشخیص هم‌فرکانس (DFT فقط روی فرکانس خودمون) ؛ به لبه‌ها و دقت نمونه‌برداری وابسته نیست. */
@@ -1005,6 +1005,9 @@ typedef struct {
     float   swing;      /* دامنه‌ی معادل موج مربعی (پیک تا پیک، ولت) */
     float   purity;     /* 0..1 : چقدر از موج همون فرکانس ارسالی است */
     uint8_t tooFast;    /* 1 = نمونه‌برداری برای این فرکانس کافی نیست */
+    float   freq;       /* فرکانسی که واقعاً پیدا شد (Hz) */
+    float   ratio;      /* قله / زمینه */
+    float   pp;         /* پیک‌تاپیک خام (ولت) */
 } WtMeas_t;
 
 /* شکل موج «سالم» که کاربر یاد داده */
@@ -1019,8 +1022,8 @@ static WtState_t wt_check(const WtMeas_t *m, const WtRef_t *ref)
     if (minPu < WT_PURITY_MIN) minPu = WT_PURITY_MIN;
 
     if (m->swing < WT_NOISE_V) return WT_NO_SIGNAL;          /* هیچ نوسانی نیومده */
-    if (m->swing < minSw)      return WT_WEAK;
     if (m->purity < minPu)     return WT_NOISY;              /* نوسان هست ولی همون موج ما نیست */
+    if (m->swing < minSw)      return WT_WEAK;
     return WT_OK;
 }
 
@@ -1041,6 +1044,7 @@ static void wt_sincos(float w, float *sn, float *cs)
 
 /* Probe1 رو از مسیر DC خودش (PC4 ، همون مسیر ولت‌متر) می‌خونه، نه PB1 که خازنی کوپل شده.
  * پنجره ≈ ۴ پریود PWM (یا سریع‌ترین نمونه‌برداری ممکن). */
+#define WT_MAX_BINS 420U
 static void wt_measure(uint32_t fset, WtMeas_t *m)
 {
     memset(m, 0, sizeof *m);
@@ -1053,22 +1057,29 @@ static void wt_measure(uint32_t fset, WtMeas_t *m)
     float spp = 1.0f / ((float)fset * dt);                              /* نمونه در هر پریود */
     if (spp < 2.5f) { m->tooFast = 1U; return; }
     uint32_t n = VM_N;
+    if ((float)n > 40.0f * spp) n = (uint32_t)(40.0f * spp);           /* حداکثر ~۴۰ پریود (سرعت محاسبه) */
     float periods = (float)n / spp;
-    if (periods < 2.0f) return;
+    if (n < 16U || periods < 2.0f) return;
 
     static float x[VM_N];
-    float mean = 0.0f;
-    for (uint32_t i = 0U; i < n; i++) { x[i] = vm_counts_to_vin(s_vmBuf[i]); mean += x[i]; }
+    float mean = 0.0f, mn = 1.0e9f, mx = -1.0e9f;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        x[i] = vm_counts_to_vin(s_vmBuf[i]); mean += x[i];
+        if (x[i] < mn) mn = x[i];
+        if (x[i] > mx) mx = x[i];
+    }
     mean /= (float)n;
-    float var = 0.0f;
-    for (uint32_t i = 0U; i < n; i++) { x[i] -= mean; var += x[i] * x[i]; }
-    var /= (float)n;
+    for (uint32_t i = 0U; i < n; i++) x[i] -= mean;
+    m->pp = mx - mn;
 
-    /* فرکانس واقعی PWM و ساعت نمونه‌برداری دقیقاً معلوم نیست؛ پس اطراف فرکانس ارسالی ±۲۵٪ جستجو می‌کنیم
-     * (قدم طوری که روی کل پنجره بیشتر از ~۰.۲ پریود خطای فاز نشه) و بهترین نقطه رو می‌گیریم. */
+    /* جستجوی فرکانس: ۰.۳× تا ۲× فرکانس ارسالی؛ قله نسبت به «زمینه» (میانگین بقیه‌ی فرکانس‌ها)
+     * سنجیده می‌شه، پس نویز پهن‌باند و کمی اختلاف فرکانس مشکلی ایجاد نمی‌کنه. */
+    static float amp[WT_MAX_BINS];
     float step = 0.2f / periods;
-    float bestA = 0.0f;
-    for (float r = 0.75f; r <= 1.25f; r += step)
+    uint32_t nb = 0U, pk = 0U;
+    float r = 0.3f;
+    for (; nb < WT_MAX_BINS && r <= 2.0f; nb++, r += step)
     {
         float sw, cw;
         float w = 6.2831853f * (float)fset * r * dt;
@@ -1083,12 +1094,23 @@ static void wt_measure(uint32_t fset, WtMeas_t *m)
             s = s * cw + c * sw;
             c = cn;
         }
-        float a1 = 2.0f * __builtin_sqrtf(re * re + im * im) / (float)n;
-        if (a1 > bestA) bestA = a1;
+        amp[nb] = 2.0f * __builtin_sqrtf(re * re + im * im) / (float)n;
+        if (amp[nb] > amp[pk]) pk = nb;
     }
-    m->swing  = bestA * 1.5707963f;
-    m->purity = (var > 1.0e-9f) ? (bestA * bestA * 0.5f) / var : 0.0f;
-    if (m->purity > 1.0f) m->purity = 1.0f;
+    if (nb < 8U) return;
+    float bg = 0.0f; uint32_t nbg = 0U;
+    for (uint32_t i = 0U; i < nb; i++)
+    {
+        uint32_t d = (i > pk) ? (i - pk) : (pk - i);
+        if (d > 3U) { bg += amp[i]; nbg++; }
+    }
+    bg = (nbg != 0U) ? bg / (float)nbg : 0.0f;
+    float ratio = amp[pk] / (bg + 1.0e-6f);
+    m->swing = amp[pk] * 1.5707963f;
+    m->freq  = (float)fset * (0.3f + step * (float)pk);
+    m->ratio = ratio;
+    float p = 1.0f - 3.0f / ratio;                      /* ratio ≈ 3 یعنی فقط نویز */
+    m->purity = (p < 0.0f) ? 0.0f : ((p > 1.0f) ? 1.0f : p);
 }
 
 /* خط رو فقط وقتی متن/رنگش عوض شده دوباره می‌کشه (بدون چشمک) */
@@ -1217,6 +1239,15 @@ static void App_WiringTest(void)
 
         snprintf(b, sizeof b, "Match %u%%", (unsigned)(m.purity * 100.0f + 0.5f));
         wt_row(&ln[5], 5U, UI_ORANGE, b);
+
+        {
+            char fs[12], ps[10];
+            if (m.freq < 1000.0f) { UI_FmtFixed(fs, sizeof fs, m.freq, 0U); strcat(fs, "Hz"); }
+            else { UI_FmtFixed(fs, sizeof fs, m.freq / 1000.0f, 1U); strcat(fs, "kHz"); }
+            UI_FmtFixed(ps, sizeof ps, m.pp, 1U);
+            snprintf(b, sizeof b, "pp%sV %s x%u", ps, fs, (unsigned)(m.ratio + 0.5f));
+            wt_row(&ln[6], 6U, UI_DIM, b);
+        }
 
         /* نوار دامنه نسبت به مرجع (بدون مرجع: نسبت به ۵ ولت) */
         {
