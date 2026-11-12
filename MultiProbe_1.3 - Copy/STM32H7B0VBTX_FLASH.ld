@@ -45,9 +45,11 @@ MEMORY
 {
   ITCMRAM (xrw)  : ORIGIN = 0x00000000, LENGTH = 64K
   FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 128K
+  EXTFLASH (rx)  : ORIGIN = 0x90000000, LENGTH = 1M      /* W25Q64 first 1 MB = constant data; logo/video use 1 MB+ */
   DTCMRAM1 (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
   DTCMRAM2 (xrw) : ORIGIN = 0x20010000, LENGTH = 64K
-  RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 1024K
+  RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 768K
+  STAGE (rx)     : ORIGIN = 0x240C0000, LENGTH = 256K   /* debugger drops the QSPI data here; firmware copies it to the W25Q64 */
   RAM_CD (xrw)   : ORIGIN = 0x30000000, LENGTH = 128K
   RAM_SRD (xrw)  : ORIGIN = 0x38000000, LENGTH = 32K
 }
@@ -62,6 +64,28 @@ SECTIONS
     KEEP(*(.isr_vector)) /* Startup code */
     . = ALIGN(4);
   } >FLASH
+
+  /* Large constant data. Runtime address = external QSPI flash (0x90000000, mapped by XIP_Init()).
+   * Load address = STAGE (RAM): the debugger loads the bytes there, and ExtData_Sync() (xip_boot.c) programs
+   * them into the W25Q64 once. No external loader needed. */
+  .extdata :
+  {
+    . = ALIGN(4);
+    *pages_assets.o(.rodata .rodata.*)
+    *logo_image_rle.o(.rodata .rodata.*)
+    . = ALIGN(4);
+  } >EXTFLASH AT> STAGE
+
+  _extdata_lma  = LOADADDR(.extdata);
+  _extdata_vma  = ADDR(.extdata);
+  _extdata_size = SIZEOF(.extdata);
+
+  .extmagic :
+  {
+    _extmagic = .;
+    LONG(0x4D505153)
+    LONG(0xA5C3965A)
+  } >STAGE
 
   /* The program code and other data goes into FLASH */
   .text :

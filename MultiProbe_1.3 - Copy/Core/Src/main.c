@@ -87,6 +87,8 @@ static void MX_ADC2_Init(void);
 static void MX_DAC1_Init(void);
 static void MX_FMC_Init(void);
 static void MX_OCTOSPI1_Init(void);
+extern int XIP_Init(void);
+extern int ExtData_Sync(void);
 static void MX_OPAMP1_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_TIM1_Init(void);
@@ -146,7 +148,8 @@ int main(void)
   MX_ADC2_Init();
   MX_DAC1_Init();
   MX_FMC_Init();
-  MX_OCTOSPI1_Init();
+  (void)XIP_Init();
+  (void)ExtData_Sync();   /* programs the QSPI data staged by the debugger (first run only) */   /* maps the QSPI flash at 0x90000000 (constant data lives there) - replaces HAL OCTOSPI init */
   MX_OPAMP1_Init();
   MX_SPI3_Init();
   MX_TIM1_Init();
