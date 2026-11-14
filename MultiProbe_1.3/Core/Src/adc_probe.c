@@ -84,6 +84,15 @@ uint8_t Adc_CalibrateZero(void)
     return 1U;
 }
 
+/* بدون کلمپ/خم زانو - فقط ضریب تقسیم خطی. برای تست سیم‌کشی (DFT تک‌فرکانسی روی
+ * یک موج کوچیک): هر کلمپ‌کردنی به صفر، حتی چند صدم ولت، شکل موج رو غیرخطی
+ * می‌کنه و «خلوص» (match%) رو به‌خصوص در دامنه‌ی کم (سیم واقعی با بار ECU، یا
+ * تغذیه‌ی پایین) به‌شدت پایین می‌آره. */
+float Adc_PinToVinLinear(float p)
+{
+    return p * DIVIDER_VIN;
+}
+
 float Adc_PinToVin(float p)
 {
     float z = s_pc4Zero;

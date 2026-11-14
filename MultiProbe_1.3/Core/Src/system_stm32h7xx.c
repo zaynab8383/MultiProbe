@@ -303,6 +303,13 @@ void SystemInit (void)
 #endif /* USER_VECT_TAB_ADDRESS */
 
 #endif /*DUAL_CORE && CORE_CM4*/
+
+  /* External QSPI flash + OTFDEC: after this returns, the firmware image at 0x90000000 is readable/executable.
+   * Kept here (not in the startup .s) so CubeMX code regeneration cannot remove it. */
+  {
+    extern void Boot_ExternalInit(void);
+    Boot_ExternalInit();
+  }
 }
 
 /**

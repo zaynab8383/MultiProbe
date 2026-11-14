@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 #include "lcd.h"
 #include "leds.h"
 #include "w25q64.h"
@@ -33,6 +34,7 @@
 #include "app.h"
 #include "carousel.h"
 #include "probe_hw.h"
+#include "device_lock.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -87,8 +89,6 @@ static void MX_ADC2_Init(void);
 static void MX_DAC1_Init(void);
 static void MX_FMC_Init(void);
 static void MX_OCTOSPI1_Init(void);
-extern int XIP_Init(void);
-extern int ExtData_Sync(void);
 static void MX_OPAMP1_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_TIM1_Init(void);
@@ -148,8 +148,7 @@ int main(void)
   MX_ADC2_Init();
   MX_DAC1_Init();
   MX_FMC_Init();
-  (void)XIP_Init();
-  (void)ExtData_Sync();   /* programs the QSPI data staged by the debugger (first run only) */   /* maps the QSPI flash at 0x90000000 (constant data lives there) - replaces HAL OCTOSPI init */
+  /* QSPI flash is mapped + decrypted by Boot_ExternalInit() (xip_boot.c), called from SystemInit(). */
   MX_OPAMP1_Init();
   MX_SPI3_Init();
   MX_TIM1_Init();
@@ -167,6 +166,40 @@ int main(void)
   HAL_GPIO_Init(GPIOC, &gi);
 
   LCD_Init();
+
+  /* === قفل ضد-کپی بر پایه‌ی UID میکرو (device_lock.c) ===
+   * اولین فلش: روی صفحه "NOT PROVISIONED" + 4 عدد هگز میاد؛ همونا رو توی device_lock.c
+   * (DEVLOCK_EXPECTED0..3) بذار و دوباره فلش کن. از اون به بعد این فریمور فقط رو همین چیپ
+   * بالا میاد -- روی یک میکروی دیگه (حتی با همین QSPI/فلش کپی‌شده) اینجا متوقف می‌مونه.
+   * توجه: این به‌تنهایی کافی نیست؛ باید با Read-Out Protection (RDP) هم همراه بشه، وگرنه
+   * کسی که از SWD فلش داخلی رو دامپ کنه هم رمز هم عدد مورد انتظار رو می‌بینه. */
+  {
+      uint32_t fp[4];
+      DevLock_Result_t lr = DeviceLock_Check(fp);
+      if (lr != DEVLOCK_OK)
+      {
+          LCD_FillColor(LCD_COLOR_BLACK);
+          if (lr == DEVLOCK_UNPROVISIONED)
+          {
+              char line[32];
+              LCD_DrawString(6, 50, "NOT PROVISIONED", LCD_COLOR_YELLOW, LCD_COLOR_BLACK, 1);
+              LCD_DrawString(6, 70, "copy into", LCD_COLOR_WHITE, LCD_COLOR_BLACK, 1);
+              LCD_DrawString(6, 82, "device_lock.c:", LCD_COLOR_WHITE, LCD_COLOR_BLACK, 1);
+              for (uint8_t i = 0U; i < 4U; i++)
+              {
+                  snprintf(line, sizeof line, "FP%u 0x%08lX", (unsigned)i, (unsigned long)fp[i]);
+                  LCD_DrawString(6, (uint16_t)(104 + i * 14), line, LCD_COLOR_CYAN, LCD_COLOR_BLACK, 1);
+              }
+          }
+          else
+          {
+              LCD_DrawString(30, 100, "LOCKED", LCD_COLOR_RED, LCD_COLOR_BLACK, 3);
+              LCD_DrawString(6, 150, "wrong chip / UID", LCD_COLOR_WHITE, LCD_COLOR_BLACK, 1);
+          }
+          for (;;) { HAL_Delay(1000); }   /* عمداً متوقف می‌مونه؛ بقیه‌ی main() هیچ‌وقت اجرا نمی‌شه */
+      }
+  }
+
   Adc_Init();
   Probe_Init();            /* همه‌ی OE ها HIGH (خاموش)، سوئیچ‌ها بیکار، PWM قطع */
   Adc_SelfTest();

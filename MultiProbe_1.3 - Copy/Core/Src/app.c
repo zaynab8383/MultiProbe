@@ -1042,6 +1042,14 @@ static void wt_sincos(float w, float *sn, float *cs)
     *sn = s; *cs = c;
 }
 
+/* مثل vm_counts_to_vin ولی خطی (Adc_PinToVinLinear، بدون کلمپ زیر صفر/خم زانو).
+ * اون تصحیح مخصوص ولت‌متر DCه؛ روی موج کوچیک تست سیم‌کشی (مخصوصاً تغذیه‌ی پایین
+ * یا سیم واقعی با بار) نصف پایین موج رو صاف می‌کنه و DFT رو خراب می‌کنه. */
+static float wt_counts_to_vin(uint32_t c)
+{
+    return Adc_PinToVinLinear((float)c * 3.3f / 65535.0f);
+}
+
 /* Probe1 رو از مسیر DC خودش (PC4 ، همون مسیر ولت‌متر) می‌خونه، نه PB1 که خازنی کوپل شده.
  * پنجره ≈ ۴ پریود PWM (یا سریع‌ترین نمونه‌برداری ممکن). */
 #define WT_MAX_BINS 420U
@@ -1065,7 +1073,7 @@ static void wt_measure(uint32_t fset, WtMeas_t *m)
     float mean = 0.0f, mn = 1.0e9f, mx = -1.0e9f;
     for (uint32_t i = 0U; i < n; i++)
     {
-        x[i] = vm_counts_to_vin(s_vmBuf[i]); mean += x[i];
+        x[i] = wt_counts_to_vin(s_vmBuf[i]); mean += x[i];
         if (x[i] < mn) mn = x[i];
         if (x[i] > mx) mx = x[i];
     }

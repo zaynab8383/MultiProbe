@@ -45,11 +45,11 @@ MEMORY
 {
   ITCMRAM (xrw)  : ORIGIN = 0x00000000, LENGTH = 64K
   FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 128K
-  EXTFLASH (rx)  : ORIGIN = 0x90000000, LENGTH = 1M      /* W25Q64 first 1 MB = constant data; logo/video use 1 MB+ */
+  EXTFLASH (rx)  : ORIGIN = 0x90000000, LENGTH = 1M      /* W25Q64 first 1 MB = firmware image (code+const); logo/video use 1 MB+ */
   DTCMRAM1 (xrw) : ORIGIN = 0x20000000, LENGTH = 64K
   DTCMRAM2 (xrw) : ORIGIN = 0x20010000, LENGTH = 64K
-  RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 768K
-  STAGE (rx)     : ORIGIN = 0x240C0000, LENGTH = 256K   /* debugger drops the QSPI data here; firmware copies it to the W25Q64 */
+  RAM (xrw)      : ORIGIN = 0x24000000, LENGTH = 640K
+  STAGE (rx)     : ORIGIN = 0x240A0000, LENGTH = 384K   /* debugger drops the plain firmware image here; Boot_ExternalInit() encrypts+programs it to the W25Q64 */
   RAM_CD (xrw)   : ORIGIN = 0x30000000, LENGTH = 128K
   RAM_SRD (xrw)  : ORIGIN = 0x38000000, LENGTH = 32K
 }
@@ -65,30 +65,33 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  /* Large constant data. Runtime address = external QSPI flash (0x90000000, mapped by XIP_Init()).
-   * Load address = STAGE (RAM): the debugger loads the bytes there, and ExtData_Sync() (xip_boot.c) programs
-   * them into the W25Q64 once. No external loader needed. */
-  .extdata :
+  /* Boot stage: runs BEFORE the external flash is mapped/decrypted, so it must stay in internal flash.
+   * Also w25q64.c: it takes the external flash out of memory-mapped mode (erase/program). */
+  .boot_text :
   {
     . = ALIGN(4);
+    *startup_stm32h7b0vbtx.o(.text .text.*)
+    *system_stm32h7xx.o(.text .text.* .rodata .rodata.*)
+    *xip_boot.o(.text .text.* .rodata .rodata.*)
+    *aes_boot.o(.text .text.* .rodata .rodata.*)
+    *otf_crypto.o(.text .text.* .rodata .rodata.*)
+    *w25q64.o(.text .text.* .rodata .rodata.*)
+    . = ALIGN(4);
+  } >FLASH
+
+  /* ---- Everything below is the external-flash image -------------------------------------------------------
+   * Run address (VMA) = W25Q64 mapped at 0x90000000 (encrypted by OTFDEC when OTF_ENABLE = 1).
+   * Load address (LMA) = STAGE in RAM, mirroring the same offsets: the debugger drops the plain image there and
+   * Boot_ExternalInit() encrypts + programs it into the W25Q64. No external loader needed.                     */
+  .extdata : AT(ORIGIN(STAGE) + ADDR(.extdata) - ORIGIN(EXTFLASH))
+  {
+    . = ALIGN(16);
     *pages_assets.o(.rodata .rodata.*)
     *logo_image_rle.o(.rodata .rodata.*)
     . = ALIGN(4);
-  } >EXTFLASH AT> STAGE
+  } >EXTFLASH
 
-  _extdata_lma  = LOADADDR(.extdata);
-  _extdata_vma  = ADDR(.extdata);
-  _extdata_size = SIZEOF(.extdata);
-
-  .extmagic :
-  {
-    _extmagic = .;
-    LONG(0x4D505153)
-    LONG(0xA5C3965A)
-  } >STAGE
-
-  /* The program code and other data goes into FLASH */
-  .text :
+  .text : AT(ORIGIN(STAGE) + ADDR(.text) - ORIGIN(EXTFLASH))
   {
     . = ALIGN(4);
     *(.text)           /* .text sections (code) */
@@ -102,50 +105,57 @@ SECTIONS
 
     . = ALIGN(4);
     _etext = .;        /* define a global symbols at end of code */
-  } >FLASH
+  } >EXTFLASH
 
-  /* Constant data goes into FLASH */
-  .rodata :
+  .rodata : AT(ORIGIN(STAGE) + ADDR(.rodata) - ORIGIN(EXTFLASH))
   {
     . = ALIGN(4);
     *(.rodata)         /* .rodata sections (constants, strings, etc.) */
     *(.rodata*)        /* .rodata* sections (constants, strings, etc.) */
     . = ALIGN(4);
-  } >FLASH
+  } >EXTFLASH
 
-  .ARM.extab (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-  {
-    *(.ARM.extab* .gnu.linkonce.armextab.*)
-  } >FLASH
-  .ARM (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
-  {
-    __exidx_start = .;
-    *(.ARM.exidx*)
-    __exidx_end = .;
-  } >FLASH
+  /* exidx/extab dropped: PREL31 cannot span internal flash <-> 0x90000000 */
+  PROVIDE(__exidx_start = 0);
+  PROVIDE(__exidx_end = 0);
 
-  .preinit_array (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .preinit_array (READONLY) : AT(ORIGIN(STAGE) + ADDR(.preinit_array) - ORIGIN(EXTFLASH))
   {
     PROVIDE_HIDDEN (__preinit_array_start = .);
     KEEP (*(.preinit_array*))
     PROVIDE_HIDDEN (__preinit_array_end = .);
-  } >FLASH
+  } >EXTFLASH
 
-  .init_array (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .init_array (READONLY) : AT(ORIGIN(STAGE) + ADDR(.init_array) - ORIGIN(EXTFLASH))
   {
     PROVIDE_HIDDEN (__init_array_start = .);
     KEEP (*(SORT(.init_array.*)))
     KEEP (*(.init_array*))
     PROVIDE_HIDDEN (__init_array_end = .);
-  } >FLASH
+  } >EXTFLASH
 
-  .fini_array (READONLY) : /* The READONLY keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .fini_array (READONLY) : AT(ORIGIN(STAGE) + ADDR(.fini_array) - ORIGIN(EXTFLASH))
   {
     PROVIDE_HIDDEN (__fini_array_start = .);
     KEEP (*(SORT(.fini_array.*)))
     KEEP (*(.fini_array*))
     PROVIDE_HIDDEN (__fini_array_end = .);
-  } >FLASH
+    . = ALIGN(16);
+    _extimg_end = .;
+  } >EXTFLASH
+
+  _extstage_base = ORIGIN(STAGE);
+  _extimg_size   = _extimg_end - ORIGIN(EXTFLASH);
+  ASSERT(_extimg_size < LENGTH(STAGE) - 64, "External-flash image does not fit the STAGE RAM area (enlarge STAGE)")
+  ASSERT(_extimg_size < LENGTH(EXTFLASH), "External-flash image larger than 1 MB (the rest of the W25Q64 is used by logo/video)")
+
+  /* marker: "a freshly staged image is waiting" - at the very end of STAGE, set by the debugger load */
+  .extmagic (ORIGIN(STAGE) + LENGTH(STAGE) - 8) :
+  {
+    _extmagic = .;
+    LONG(0x4D505153)
+    LONG(0xA5C3965A)
+  } >STAGE
 
   /* used by the startup to initialize data */
   _sidata = LOADADDR(.data);
@@ -194,6 +204,7 @@ SECTIONS
   /* Remove information from the standard libraries */
   /DISCARD/ :
   {
+    *(.ARM.exidx* .ARM.extab* .gnu.linkonce.armextab.*)
     libc.a ( * )
     libm.a ( * )
     libgcc.a ( * )

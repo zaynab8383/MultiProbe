@@ -10,19 +10,26 @@
  * Do not call these from interrupt handlers.
  */
 
-static uint8_t s_mapped = 0U;
+static uint8_t  s_mapped = 1U;   /* Boot_ExternalInit() leaves the flash memory-mapped */
+static uint32_t s_primask = 0U;
+
+/* This whole file is linked into INTERNAL flash and interrupts are masked while the external flash is NOT
+ * memory-mapped (erase/program): code and ISRs live in the external flash and could not be fetched meanwhile. */
 
 static HAL_StatusTypeDef begin_indirect(void)
 {
+    s_primask = __get_PRIMASK();
+    __disable_irq();
     s_mapped = 0U;
     return qll_hw_init() ? HAL_OK : HAL_ERROR;
 }
 
 static HAL_StatusTypeDef end_indirect(void)
 {
-    if (!qll_enter_mmap()) return HAL_ERROR;
-    s_mapped = 1U;
-    return HAL_OK;
+    int ok = qll_enter_mmap();
+    if (ok) s_mapped = 1U;
+    if (!s_primask) __enable_irq();
+    return ok ? HAL_OK : HAL_ERROR;
 }
 
 HAL_StatusTypeDef W25Q64_ReadID(uint8_t *id_buf3)
@@ -56,8 +63,14 @@ HAL_StatusTypeDef W25Q64_Read(uint32_t address, uint8_t *buffer, uint32_t length
         length > (W25Q64_CAPACITY_BYTES - address))
         return HAL_ERROR;
 
-    if (!s_mapped && end_indirect() != HAL_OK)
-        return HAL_ERROR;
+    if (!s_mapped)
+    {
+        s_primask = __get_PRIMASK();
+        __disable_irq();
+        if (!qll_enter_mmap()) { if (!s_primask) __enable_irq(); return HAL_ERROR; }
+        s_mapped = 1U;
+        if (!s_primask) __enable_irq();
+    }
 
     memcpy(buffer, (const void *)(QLL_MAP_BASE + address), length);
     return HAL_OK;
