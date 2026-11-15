@@ -1482,10 +1482,9 @@ static void App_Tests(void) { RunSubMenu(&s_testScreen); }
 
 /* ================================================================== */
 /*  شبیه‌ساز سنسور (طبق دفترچه‌ی مولتی‌پروب نگارخودرو)                  */
-/*  خروجی روی Probe2 : سنسورهای فرکانسی (دور موتور ، میل سوپاپ ، سرعت)  */
-/*  موج مربعی ؛ بقیه ولتاژ آنالوگ DAC2. بالا/پایین و چپ/راست = تغییر مقدار*/
+/*  فرکانسی‌ها PWM روی Probe1 (دور موتور: Probe2 = PWM not) ؛ بقیه DAC1.  */
 /* ================================================================== */
-typedef enum { SS_FREQ_RPM, SS_FREQ_CAM, SS_FREQ_SPEED, SS_ANALOG, SS_ANALOG_INV } SsKind_t;
+typedef enum { SS_FREQ_RPM, SS_FREQ_CAM, SS_FREQ_SPEED, SS_ANALOG, SS_ANALOG_INV, SS_DUAL_PEDAL, SS_DUAL_TPS } SsKind_t;
 typedef struct {
     const char *name;     /* اسم روی منو */
     const char *unit;
@@ -1506,12 +1505,17 @@ static const SensorDef_t k_sensors[] = {
     { "Manifold Press", "%",    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
     { "Gas Tank Press","%"  ,    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
     { "Gas Rail Press", "%",    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
-    { "Electric Gas Pedal", "%",    SS_ANALOG,      0,  100,  1,   0,  0.5f, 3.0f },
-    { "Electric Throttle", "%",    SS_ANALOG,      0,  100,  1,   0,  0.5f, 3.0f },
+    { "Electric Gas Pedal", "%",    SS_DUAL_PEDAL,      0,  100,  1,   0,  0.5f, 3.0f },
+    { "Electric Throttle", "%",    SS_DUAL_TPS,      0,  100,  1,   0,  0.5f, 3.0f },
     { "Oxygen Sensor",  "%",    SS_ANALOG,      0,  100,  1,  50,  0.1f, 0.9f },
 };
 #define SENSOR_COUNT ((uint8_t)(sizeof(k_sensors) / sizeof(k_sensors[0])))
 
+/* مسیر خروجی هر سنسور (طبق طراحی برد):
+ *  دور موتور        : Probe1 = PWM ، Probe2 = PWM not  (چرخ ۶۰-۲ دندانه)
+ *  میل سوپاپ / سرعت  : Probe1 = PWM
+ *  دماها ، فشارها ، اکسیژن : Probe1 = DAC
+ *  پدال گاز / دریچه‌ی گاز برقی : Probe1 = DAC و Probe2 = DAC (دو ترک) */
 static void ss_output(const SensorDef_t *d, int32_t v, uint8_t on, char *info, size_t n)
 {
     Probe_PwmStop();
@@ -1519,25 +1523,40 @@ static void ss_output(const SensorDef_t *d, int32_t v, uint8_t on, char *info, s
     info[0] = '\0';
     if (!on) { snprintf(info, n, "OUTPUT OFF"); return; }
 
-    if (d->kind == SS_ANALOG || d->kind == SS_ANALOG_INV)
+    if (d->kind == SS_FREQ_RPM)
     {
-        float f = (float)(v - d->vmin) / (float)(d->vmax - d->vmin);
-        if (d->kind == SS_ANALOG_INV) f = 1.0f - f;          /* NTC: گرم‌تر = ولتاژ کمتر */
-        float volts = d->vlo + f * (d->vhi - d->vlo);
-        Probe_DacSwitch(2U, 1U);
-        Probe_DacSet(2U, volts);
-        char t[12]; UI_FmtFixed(t, sizeof t, volts, 2U);
-        snprintf(info, n, "P2 DAC %sV", t);
+        uint32_t hz = (uint32_t)v;                        /* ۶۰ دندانه: Hz = rpm */
+        if (hz == 0U) { snprintf(info, n, "P1/P2 0 Hz"); return; }
+        Probe_PwmStartCrank(hz);                          /* ۶۰-۲: دو دندانه‌ی آخر خالی */
+        snprintf(info, n, "P1 PWM P2 /PWM");
+    }
+    else if (d->kind == SS_FREQ_CAM || d->kind == SS_FREQ_SPEED)
+    {
+        uint32_t hz = (d->kind == SS_FREQ_CAM) ? (uint32_t)((v * 4) / 60)       /* ۴ دندانه */
+                                               : (uint32_t)((v * 4000) / 3600); /* ۴۰۰۰ پالس بر کیلومتر */
+        if (hz == 0U) { snprintf(info, n, "P1 0 Hz"); return; }
+        Probe_PwmStart(PROBE_1, hz, 50U);
+        snprintf(info, n, "P1 %luHz", (unsigned long)hz);
     }
     else
     {
-        uint32_t hz;
-        if (d->kind == SS_FREQ_RPM)        hz = (uint32_t)v;                       /* چرخ ۶۰ دندانه: Hz = rpm */
-        else if (d->kind == SS_FREQ_CAM)   hz = (uint32_t)((v * 4) / 60);          /* ۴ دندانه */
-        else                               hz = (uint32_t)((v * 4000) / 3600);     /* ۴۰۰۰ پالس بر کیلومتر */
-        if (hz == 0U) { snprintf(info, n, "P2 0 Hz"); return; }
-        Probe_PwmStart(PROBE_2, hz, 50U);
-        snprintf(info, n, "P2 %luHz", (unsigned long)hz);
+        float f = (float)(v - d->vmin) / (float)(d->vmax - d->vmin);
+        if (d->kind == SS_ANALOG_INV) f = 1.0f - f;          /* NTC: گرم‌تر = ولتاژ کمتر */
+        float v1 = d->vlo + f * (d->vhi - d->vlo);
+        Probe_DacSwitch(1U, 1U);
+        Probe_DacSet(1U, v1);
+        char t[12], t2[12];
+        UI_FmtFixed(t, sizeof t, v1, 2U);
+        if (d->kind == SS_DUAL_PEDAL || d->kind == SS_DUAL_TPS)
+        {
+            /* پدال و دریچه: Probe2 = NOT ی Probe1 (قرینه نسبت به وسط بازه) */
+            float v2 = d->vlo + d->vhi - v1;
+            Probe_DacSwitch(2U, 1U);
+            Probe_DacSet(2U, v2);
+            UI_FmtFixed(t2, sizeof t2, v2, 2U);
+            snprintf(info, n, "P1 %s P2 %sV", t, t2);
+        }
+        else snprintf(info, n, "P1 DAC %sV", t);
     }
 }
 
@@ -1591,7 +1610,7 @@ static void SensorRun(uint8_t idx)
             if (w) LCD_FillRect(10U, 128U, w, 10U, on ? UI_OK : UI_DIM);
             LCD_FillRect(0U, 150U, LCD_WIDTH, 40U, UI_BG);
             UI_Text(10U, 154U, 2U, on ? UI_ORANGE : UI_DIM, UI_BG, info);
-            UI_Text(10U, 178U, 1U, UI_DIM, UI_BG, "Probe2 -> ECU signal pin");
+            UI_Text(10U, 178U, 1U, UI_DIM, UI_BG, "Probe1 (+Probe2 where needed)");
         }
     }
     Probe_PwmStop();
@@ -1734,7 +1753,7 @@ static void App_SensorSim(void)
             uint8_t nsc = (strlen(d->name) * 12U <= 232U) ? 2U : 1U;
             uint16_t w = (uint16_t)(strlen(d->name) * 6U * nsc);
             UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), (uint16_t)(nsc == 2U ? 152U : 156U), nsc, UI_TITLE, UI_BG, d->name);
-            const char *kind = (d->kind <= SS_FREQ_SPEED) ? "frequency output" : "analog output";
+            const char *kind = (d->kind <= SS_FREQ_SPEED) ? "PWM output" : (d->kind >= SS_DUAL_PEDAL) ? "DAC output P1+P2" : "DAC output P1";
             w = (uint16_t)(strlen(kind) * 6U);
             UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), 176U, 1U, UI_DIM, UI_BG, kind);
             /* شماره */

@@ -73,10 +73,83 @@ void Probe_Init(void)
     Probe_AllOff();
 }
 
+/* ---- سیگنال میل‌لنگ ۶۰-۲ : روی Probe1 موج PWM و روی Probe2 معکوسش (PWM not) ---- */
+#define CRANK_TEETH      60U
+#define CRANK_MISSING    2U
+static volatile uint8_t  s_crank = 0U;
+static volatile uint8_t  s_crankIdx = 0U;
+static volatile uint32_t s_crankCcr = 0U;
+
+/* شروع هر پریود: CCR (شدوی preload) برای پریود بعدی تنظیم می‌شه؛ دو دندانه‌ی آخر CCR=0 -> دندانه‌ی خالی */
+void TIM15_IRQHandler(void)
+{
+    if (TIM15->SR & TIM_SR_UIF)
+    {
+        TIM15->SR = ~TIM_SR_UIF;
+        if (s_crank)
+        {
+            uint8_t n = (uint8_t)((s_crankIdx + 1U) % CRANK_TEETH);
+            s_crankIdx = n;
+            TIM15->CCR1 = (n >= (CRANK_TEETH - CRANK_MISSING)) ? 0U : s_crankCcr;
+        }
+    }
+}
+
+static void crank_disable(void)
+{
+    s_crank = 0U;
+    TIM15->DIER &= ~TIM_DIER_UIE;
+    TIM15->CCMR1 &= ~TIM_CCMR1_OC1PE;
+    HAL_NVIC_DisableIRQ(TIM15_IRQn);
+}
+
+void Probe_PwmStartCrank(uint32_t tooth_hz)
+{
+    ohm_gnd_off();
+    if (tooth_hz < 1U)      tooth_hz = 1U;
+    if (tooth_hz > 20000U)  tooth_hz = 20000U;
+
+    oe(OE_P1_PORT, OE_P1_PIN, 0U);
+    oe(OE_P2_PORT, OE_P2_PIN, 0U);
+    crank_disable();
+    if (s_pwmOn)
+    {
+        (void)HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);
+        (void)HAL_TIMEx_PWMN_Stop(&htim15, TIM_CHANNEL_1);
+    }
+
+    uint32_t tclk = HAL_RCC_GetPCLK2Freq() * 2U;
+    uint32_t psc  = tclk / (tooth_hz * 65000UL);
+    uint32_t arr  = tclk / ((psc + 1U) * tooth_hz) - 1U;
+    if (arr < 3U) arr = 3U;
+    s_crankCcr = (arr + 1U) / 2U;                              /* دندانه با duty 50٪ */
+    s_crankIdx = 0U;
+
+    __HAL_TIM_SET_PRESCALER(&htim15, psc);
+    __HAL_TIM_SET_AUTORELOAD(&htim15, arr);
+    TIM15->CCMR1 |= TIM_CCMR1_OC1PE;                           /* CCR فقط روی لبه‌ی پریود بعدی اعمال بشه */
+    __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_1, s_crankCcr);
+    __HAL_TIM_SET_COUNTER(&htim15, 0U);
+    TIM15->EGR = TIM_EGR_UG;
+    TIM15->SR  = ~TIM_SR_UIF;
+
+    s_crank = 1U;
+    TIM15->DIER |= TIM_DIER_UIE;
+    HAL_NVIC_SetPriority(TIM15_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM15_IRQn);
+
+    (void)HAL_TIM_PWM_Start(&htim15, TIM_CHANNEL_1);
+    (void)HAL_TIMEx_PWMN_Start(&htim15, TIM_CHANNEL_1);        /* CH1N = مکمل CH1 */
+    s_pwmOn = 1U;
+    oe(OE_P1_PORT, OE_P1_PIN, 1U);                             /* هر دو پروب فعال */
+    oe(OE_P2_PORT, OE_P2_PIN, 1U);
+}
+
 void Probe_PwmStop(void)
 {
     oe(OE_P1_PORT, OE_P1_PIN, 0U);
     oe(OE_P2_PORT, OE_P2_PIN, 0U);
+    crank_disable();
     if (s_pwmOn)
     {
         (void)HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);
@@ -104,6 +177,7 @@ void Probe_PwmStart(ProbeId_t p, uint32_t f, uint8_t duty)
     /* تا وقتی تنظیمات عوض می‌شه هر دو خروجی غیرفعال */
     oe(OE_P1_PORT, OE_P1_PIN, 0U);
     oe(OE_P2_PORT, OE_P2_PIN, 0U);
+    crank_disable();
     if (s_pwmOn)
     {
         (void)HAL_TIM_PWM_Stop(&htim15, TIM_CHANNEL_1);

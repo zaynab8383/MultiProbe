@@ -20,6 +20,8 @@ void  Probe_AllOff(void);                     /* PWM قطع، OE ها HIGH، س�
 /* PWM: probe خروجی می‌ده (OE اون پایه LOW)، پروب دیگه Hi-Z می‌مونه */
 void  Probe_PwmStart(ProbeId_t p, uint32_t freq_hz, uint8_t duty_pct);
 void  Probe_PwmStop(void);
+/* سیگنال دور موتور ۶۰-۲ : Probe1 = PWM ، Probe2 = PWM not ، فرکانس دندانه (Hz = rpm) */
+void  Probe_PwmStartCrank(uint32_t tooth_hz);
 
 /* نمونه‌برداری سریع و استخراج مشخصات سیگنال (~۲۰ms بلاک می‌شه) */
 void  Probe_Measure(ReadSrc_t src, SigStat_t *out);
