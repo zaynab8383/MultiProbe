@@ -21,7 +21,16 @@ static const char *const k_sub[CAROUSEL_PAGES] = {
     "Oscilloscope", "Ohmmeter", "Buzzer", "Wiring Test", "ECU Flash"
 };
 
-static uint8_t s_cur   = 0U;
+/* صفحه‌هایی که توی منوی اصلی دیده می‌شن. فعلاً Dashboard (پشت آمپر) و ECU Flash کامنت شدن:
+ * برای برگردوندن، شماره‌ی 0 و 9 رو دوباره به لیست اضافه کن. */
+static const uint8_t k_vis[] = {
+    /* 0, */   /* Dashboard (پشت آمپر) */
+    1, 2, 3, 4, 5, 6, 7, 8
+    /* , 9 */  /* ECU Flash */
+};
+#define VIS_N  ((uint8_t)(sizeof(k_vis) / sizeof(k_vis[0])))
+
+static uint8_t s_cur   = 0U;     /* ایندکس داخل k_vis */
 static uint8_t s_dirty = 1U;
 
 void Carousel_Init(void)
@@ -103,15 +112,15 @@ void Carousel_Draw(void)
     if (!s_dirty) return;
     s_dirty = 0U;
 
-    UI_SetTheme(s_cur);            /* status bar takes the page color too */
-    Carousel_DrawPage(s_cur);
+    UI_SetTheme(k_vis[s_cur]);            /* status bar takes the page color too */
+    Carousel_DrawPage(k_vis[s_cur]);
 
     tri_left(12U, 132U);
     tri_right(215U, 132U);
 
     /* page dots */
-    uint16_t x0 = (uint16_t)((LCD_WIDTH - (CAROUSEL_PAGES * 14U - 8U)) / 2U);
-    for (uint8_t i = 0U; i < CAROUSEL_PAGES; i++)
+    uint16_t x0 = (uint16_t)((LCD_WIDTH - (VIS_N * 14U - 8U)) / 2U);
+    for (uint8_t i = 0U; i < VIS_N; i++)
     {
         uint16_t x = (uint16_t)(x0 + i * 14U);
         if (i == s_cur) LCD_FillRect(x, 211U, 8U, 8U, COL_LINE);
@@ -124,15 +133,15 @@ void Carousel_HandleInput(MenuInput_t in)
     switch (in)
     {
     case MENU_INPUT_RIGHT:
-        s_cur = (uint8_t)((s_cur + 1U) % CAROUSEL_PAGES);
+        s_cur = (uint8_t)((s_cur + 1U) % VIS_N);
         s_dirty = 1U;
         break;
     case MENU_INPUT_LEFT:
-        s_cur = (s_cur == 0U) ? (uint8_t)(CAROUSEL_PAGES - 1U) : (uint8_t)(s_cur - 1U);
+        s_cur = (s_cur == 0U) ? (uint8_t)(VIS_N - 1U) : (uint8_t)(s_cur - 1U);
         s_dirty = 1U;
         break;
     case MENU_INPUT_SELECT:
-        App_RunPage(s_cur);
+        App_RunPage(k_vis[s_cur]);
         s_dirty = 1U;
         break;
     case MENU_INPUT_UP:

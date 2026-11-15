@@ -1,4 +1,5 @@
 #include "app.h"
+#include <math.h>
 #include "ui.h"
 #include "lcd.h"
 #include "leds.h"
@@ -1470,6 +1471,8 @@ static const MenuItem_t s_testItems[] = {
     { "Key Test",  App_KeyTest  },
     { "LED Test",  App_LedTest  },
     { "Video",     App_Video    },
+    { "PWM Gen/Read", App_Pwm   },
+    { "DAC Out",      App_Dac   },
 };
 static const MenuScreen_t s_testScreen = {
     .title = "TESTS", .items = s_testItems,
@@ -1477,15 +1480,285 @@ static const MenuScreen_t s_testScreen = {
 };
 static void App_Tests(void) { RunSubMenu(&s_testScreen); }
 
-static const MenuItem_t s_simItems[] = {
-    { "PWM Gen/Read", App_Pwm },
-    { "DAC Out",      App_Dac },
+/* ================================================================== */
+/*  شبیه‌ساز سنسور (طبق دفترچه‌ی مولتی‌پروب نگارخودرو)                  */
+/*  خروجی روی Probe2 : سنسورهای فرکانسی (دور موتور ، میل سوپاپ ، سرعت)  */
+/*  موج مربعی ؛ بقیه ولتاژ آنالوگ DAC2. بالا/پایین و چپ/راست = تغییر مقدار*/
+/* ================================================================== */
+typedef enum { SS_FREQ_RPM, SS_FREQ_CAM, SS_FREQ_SPEED, SS_ANALOG, SS_ANALOG_INV } SsKind_t;
+typedef struct {
+    const char *name;     /* اسم روی منو */
+    const char *unit;
+    SsKind_t    kind;
+    int32_t     vmin, vmax, step, init;
+    float       vlo, vhi; /* آنالوگ: ولتاژ DAC در حداقل / حداکثر مقدار */
+} SensorDef_t;
+
+static const SensorDef_t k_sensors[] = {
+    { "Engine RPM",     "rpm",  SS_FREQ_RPM,    0, 8000, 50, 800,  0, 0 },
+    { "Camshaft",       "rpm",  SS_FREQ_CAM,    0, 4000, 25, 400,  0, 0 },
+    { "Speed",          "km/h", SS_FREQ_SPEED,  0,  250,  1,  60,  0, 0 },
+    { "Water Temp",     "C",    SS_ANALOG_INV,  0,  100,  1,  80,  0.4f, 3.0f },
+    { "Ambient Temp",   "%",    SS_ANALOG_INV,  0,  100,  1,  50,  0.4f, 3.0f },
+    { "Air Temp",       "%",    SS_ANALOG_INV,  0,  100,  1,  50,  0.4f, 3.0f },
+    { "Gas Rail Temp",  "%",    SS_ANALOG_INV,  0,  100,  1,  50,  0.4f, 3.0f },
+    { "Ambient Press",  "%",    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
+    { "Manifold Press", "%",    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
+    { "Gas Tank Press","%"  ,    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
+    { "Gas Rail Press", "%",    SS_ANALOG,      0,  100,  1,  50,  0.5f, 3.0f },
+    { "Electric Gas Pedal", "%",    SS_ANALOG,      0,  100,  1,   0,  0.5f, 3.0f },
+    { "Electric Throttle", "%",    SS_ANALOG,      0,  100,  1,   0,  0.5f, 3.0f },
+    { "Oxygen Sensor",  "%",    SS_ANALOG,      0,  100,  1,  50,  0.1f, 0.9f },
 };
-static const MenuScreen_t s_simScreen = {
-    .title = "SENSOR SIM", .items = s_simItems,
-    .count = (uint8_t)(sizeof(s_simItems) / sizeof(s_simItems[0])),
-};
-static void App_SensorSim(void) { RunSubMenu(&s_simScreen); }
+#define SENSOR_COUNT ((uint8_t)(sizeof(k_sensors) / sizeof(k_sensors[0])))
+
+static void ss_output(const SensorDef_t *d, int32_t v, uint8_t on, char *info, size_t n)
+{
+    Probe_PwmStop();
+    Probe_DacOff();
+    info[0] = '\0';
+    if (!on) { snprintf(info, n, "OUTPUT OFF"); return; }
+
+    if (d->kind == SS_ANALOG || d->kind == SS_ANALOG_INV)
+    {
+        float f = (float)(v - d->vmin) / (float)(d->vmax - d->vmin);
+        if (d->kind == SS_ANALOG_INV) f = 1.0f - f;          /* NTC: گرم‌تر = ولتاژ کمتر */
+        float volts = d->vlo + f * (d->vhi - d->vlo);
+        Probe_DacSwitch(2U, 1U);
+        Probe_DacSet(2U, volts);
+        char t[12]; UI_FmtFixed(t, sizeof t, volts, 2U);
+        snprintf(info, n, "P2 DAC %sV", t);
+    }
+    else
+    {
+        uint32_t hz;
+        if (d->kind == SS_FREQ_RPM)        hz = (uint32_t)v;                       /* چرخ ۶۰ دندانه: Hz = rpm */
+        else if (d->kind == SS_FREQ_CAM)   hz = (uint32_t)((v * 4) / 60);          /* ۴ دندانه */
+        else                               hz = (uint32_t)((v * 4000) / 3600);     /* ۴۰۰۰ پالس بر کیلومتر */
+        if (hz == 0U) { snprintf(info, n, "P2 0 Hz"); return; }
+        Probe_PwmStart(PROBE_2, hz, 50U);
+        snprintf(info, n, "P2 %luHz", (unsigned long)hz);
+    }
+}
+
+static void SensorIcon(uint8_t idx, uint16_t x, uint16_t y, uint16_t k);
+static void SensorRun(uint8_t idx)
+{
+    const SensorDef_t *d = &k_sensors[idx];
+    LEDs_AllOff();
+    UI_Begin("SENSOR");
+    UI_Hint("U/D x10 L/R +/- OK on/off");
+
+    int32_t v = d->init;
+    uint8_t on = 1U, redraw = 1U, apply = 1U;
+    char info[24] = "";
+    for (;;)
+    {
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        int32_t dv = 0;
+        if (in == MENU_INPUT_RIGHT) dv =  d->step;
+        if (in == MENU_INPUT_LEFT)  dv = -d->step;
+        if (in == MENU_INPUT_UP)    dv =  d->step * 10;
+        if (in == MENU_INPUT_DOWN)  dv = -d->step * 10;
+        if (dv != 0)
+        {
+            v += dv;
+            if (v < d->vmin) v = d->vmin;
+            if (v > d->vmax) v = d->vmax;
+            apply = 1U; redraw = 1U;
+        }
+        if (in == MENU_INPUT_SELECT) { on = (uint8_t)!on; apply = 1U; redraw = 1U; }
+
+        if (apply) { ss_output(d, v, on, info, sizeof info); apply = 0U; }
+        if (redraw)
+        {
+            redraw = 0U;
+            char b[24];
+            snprintf(b, sizeof b, "%-6ld", (long)v);
+            LCD_FillRect(0U, 50U, LCD_WIDTH, 102U, UI_BG);
+            {   /* اسم کامل سنسور ؛ اگه از ۲۰ حرف بیشتر بود ریزتر می‌شه */
+                uint8_t ns = (strlen(d->name) * 12U <= 232U) ? 2U : 1U;
+                UI_Text(4U, 52U, ns, UI_TITLE, UI_BG, d->name);
+            }
+            UI_Text(10U, 74U, 4U, on ? UI_WHITE : UI_DIM, UI_BG, b);
+            UI_Text(10U, 108U, 2U, UI_CYAN, UI_BG, d->unit);
+            SensorIcon(idx, 200U, 78U, 1U);
+            /* نوار مقدار */
+            uint16_t w = (uint16_t)(((int64_t)(v - d->vmin) * 220) / (d->vmax - d->vmin));
+            LCD_FillRect(8U, 126U, 224U, 14U, UI_FG);
+            LCD_FillRect(10U, 128U, 220U, 10U, UI_BG);
+            if (w) LCD_FillRect(10U, 128U, w, 10U, on ? UI_OK : UI_DIM);
+            LCD_FillRect(0U, 150U, LCD_WIDTH, 40U, UI_BG);
+            UI_Text(10U, 154U, 2U, on ? UI_ORANGE : UI_DIM, UI_BG, info);
+            UI_Text(10U, 178U, 1U, UI_DIM, UI_BG, "Probe2 -> ECU signal pin");
+        }
+    }
+    Probe_PwmStop();
+    Probe_DacOff();
+    Probe_AllOff();
+}
+
+/* ---------------- آیکن‌های سنسورها (طراحی روی شبکه‌ی ۳۲×۳۲ ، k = ضریب بزرگ‌نمایی) ---------------- */
+static uint16_t g_icx, g_icy, g_ick;
+static void ic_r(int x, int y, int w, int h, uint16_t c)
+{
+    LCD_FillRect((uint16_t)(g_icx + x * (int)g_ick), (uint16_t)(g_icy + y * (int)g_ick),
+                 (uint16_t)(w * (int)g_ick), (uint16_t)(h * (int)g_ick), c);
+}
+static void ic_circle(int cx, int cy, int r, uint16_t c)
+{
+    for (int dy = -r; dy <= r; dy++)
+    {
+        int dx = (int)sqrtf((float)(r * r - dy * dy));
+        ic_r(cx - dx, cy + dy, 2 * dx + 1, 1, c);
+    }
+}
+static void ic_ring(int cx, int cy, int r, int t, uint16_t c)
+{
+    ic_circle(cx, cy, r, c);
+    ic_circle(cx, cy, r - t, UI_BG);
+}
+static void ic_line(int x0, int y0, int x1, int y1, int t, uint16_t c)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int n = ((dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy)) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+    if (n == 0) n = 1;
+    for (int i = 0; i <= n; i++) ic_r(x0 + dx * i / n - t / 2, y0 + dy * i / n - t / 2, t, t, c);
+}
+static void ic_gauge(uint16_t col, int needleX, int needleY)
+{
+    ic_ring(16, 17, 14, 2, col);
+    for (int i = 0; i < 7; i++)                                   /* خط‌های مقیاس */
+    {
+        static const int8_t tx[7] = { 4, 6, 10, 16, 22, 26, 28 }, ty[7] = { 20, 11, 6, 4, 6, 11, 20 };
+        ic_r(tx[i], ty[i], 2, 2, UI_FG);
+    }
+    ic_line(16, 17, needleX, needleY, 2, UI_BAD);
+    ic_circle(16, 17, 2, UI_WHITE);
+}
+static void ic_thermo(uint16_t col)
+{
+    ic_r(13, 3, 6, 18, col);  ic_circle(16, 24, 6, col);
+    ic_r(14, 4, 4, 17, UI_BG); ic_circle(16, 24, 4, UI_BAD);
+    ic_r(15, 11, 2, 12, UI_BAD);
+    for (int y = 6; y < 18; y += 4) ic_r(20, y, 4, 1, col);
+}
+static void ic_pipe_h(uint16_t col) { ic_r(0, 12, 32, 8, col); ic_r(0, 14, 32, 4, UI_BG); }
+
+static void SensorIcon(uint8_t idx, uint16_t x, uint16_t y, uint16_t k)
+{
+    g_icx = x; g_icy = y; g_ick = k;
+    const uint16_t ac = UI_Theme()->accent;
+    switch (idx)
+    {
+    case 0:  /* Engine RPM: گیج + دندانه‌ی چرخ */
+        ic_gauge(UI_ORANGE, 25, 8); ic_r(6, 28, 20, 3, UI_FG);
+        for (int i = 6; i < 26; i += 4) ic_r(i, 26, 2, 2, UI_FG);
+        break;
+    case 1:  /* Camshaft: میل‌بادامک */
+        ic_r(1, 14, 30, 4, UI_DIM);
+        ic_circle(9, 16, 6, ac); ic_circle(7, 14, 3, UI_BG); ic_circle(7, 14, 3, ac);
+        ic_circle(23, 16, 5, UI_ORANGE); ic_r(24, 8, 4, 4, UI_ORANGE);
+        ic_circle(9, 16, 1, UI_WHITE);
+        break;
+    case 2:  /* Speed: سرعت‌سنج نیم‌دایره */
+        ic_ring(16, 20, 14, 3, UI_CYAN); ic_r(0, 21, 32, 11, UI_BG);
+        ic_line(16, 20, 26, 10, 2, UI_BAD); ic_circle(16, 20, 2, UI_WHITE);
+        ic_r(6, 26, 20, 4, UI_OK); ic_r(8, 28, 16, 2, UI_BG);
+        break;
+    case 3:  /* Water temp: دماسنج + قطره */
+        ic_thermo(UI_CYAN); ic_circle(26, 20, 3, UI_CYAN); ic_r(26, 14, 1, 4, UI_CYAN); ic_r(25, 16, 3, 2, UI_CYAN);
+        break;
+    case 4:  /* Ambient: دماسنج + خورشید */
+        ic_thermo(UI_OK); ic_circle(26, 8, 3, UI_TITLE);
+        ic_r(25, 2, 2, 2, UI_TITLE); ic_r(25, 13, 2, 2, UI_TITLE); ic_r(20, 7, 2, 2, UI_TITLE); ic_r(31, 7, 1, 2, UI_TITLE);
+        break;
+    case 5:  /* Air: دماسنج + باد */
+        ic_thermo(UI_MAGENTA); ic_r(21, 18, 10, 2, UI_WHITE); ic_r(23, 22, 8, 2, UI_WHITE); ic_r(21, 26, 10, 2, UI_WHITE);
+        break;
+    case 6:  /* Gas rail temp: دماسنج + شعله */
+        ic_thermo(UI_ORANGE); ic_circle(26, 22, 4, UI_ORANGE); ic_r(25, 12, 3, 8, UI_ORANGE); ic_circle(26, 23, 2, UI_TITLE);
+        break;
+    case 7:  /* Ambient pressure: بارومتر */
+        ic_gauge(UI_CYAN, 9, 10); ic_r(13, 26, 6, 3, UI_CYAN);
+        break;
+    case 8:  /* Manifold: لوله‌ی منیفولد با فلش */
+        ic_r(0, 8, 32, 5, UI_ORANGE); ic_r(0, 19, 32, 5, UI_ORANGE);
+        ic_r(6, 13, 4, 6, UI_ORANGE); ic_r(22, 13, 4, 6, UI_ORANGE);
+        ic_r(10, 15, 10, 2, UI_WHITE); ic_r(18, 13, 2, 6, UI_WHITE);
+        break;
+    case 9:  /* Fuel/Gas tank: مخزن */
+        ic_circle(8, 16, 7, UI_OK); ic_circle(24, 16, 7, UI_OK); ic_r(8, 9, 16, 14, UI_OK);
+        ic_r(10, 12, 12, 8, UI_BG); ic_r(14, 5, 4, 4, UI_DIM); ic_r(12, 3, 8, 2, UI_DIM);
+        ic_r(13, 14, 6, 4, UI_TITLE);
+        break;
+    case 10: /* Gas rail pressure: ریل + انژکتور */
+        ic_r(0, 8, 32, 6, UI_MAGENTA);
+        for (int i = 3; i < 30; i += 8) { ic_r(i, 14, 4, 8, UI_DIM); ic_r(i + 1, 22, 2, 5, UI_TITLE); }
+        break;
+    case 11: /* Throttle pedal: پدال */
+        ic_line(10, 4, 20, 24, 5, UI_ORANGE); ic_r(6, 26, 20, 4, UI_DIM);
+        ic_r(18, 20, 6, 8, UI_DIM);
+        break;
+    case 12: /* Throttle valve: پروانه‌ی دریچه */
+        ic_ring(16, 16, 14, 3, UI_CYAN); ic_line(6, 24, 26, 8, 3, UI_ORANGE); ic_circle(16, 16, 2, UI_WHITE);
+        break;
+    default: /* Oxygen: لامبدا */
+        ic_r(12, 2, 8, 8, UI_DIM); ic_r(10, 10, 12, 4, ac); ic_r(13, 14, 6, 12, UI_OK);
+        ic_line(16, 26, 16, 31, 2, UI_FG);
+        ic_r(24, 4, 2, 6, UI_WHITE); ic_r(28, 4, 2, 6, UI_WHITE); ic_r(24, 4, 6, 2, UI_WHITE); ic_r(24, 8, 6, 2, UI_WHITE);
+        break;
+    }
+}
+
+/* صفحه‌ی انتخاب سنسور: یک سنسور در هر صفحه با آیکن بزرگ؛ چپ/راست = بعدی/قبلی ، OK = ورود */
+static void App_SensorSim(void)
+{
+    uint8_t idx = 0U, redraw = 1U;
+    for (;;)
+    {
+        if (redraw)
+        {
+            redraw = 0U;
+            LEDs_AllOff();
+            UI_Begin("SENSOR SIM");
+            const UiTheme_t *th = UI_Theme();
+            const SensorDef_t *d = &k_sensors[idx];
+            LCD_FillRect(0U, 48U, LCD_WIDTH, 170U, UI_BG);
+            /* قاب دور آیکن */
+            LCD_FillRect(76U, 56U, 88U, 88U, th->accent);
+            LCD_FillRect(78U, 58U, 84U, 84U, UI_BG);
+            SensorIcon(idx, 88U, 68U, 2U);
+            /* اسم */
+            uint8_t nsc = (strlen(d->name) * 12U <= 232U) ? 2U : 1U;
+            uint16_t w = (uint16_t)(strlen(d->name) * 6U * nsc);
+            UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), (uint16_t)(nsc == 2U ? 152U : 156U), nsc, UI_TITLE, UI_BG, d->name);
+            const char *kind = (d->kind <= SS_FREQ_SPEED) ? "frequency output" : "analog output";
+            w = (uint16_t)(strlen(kind) * 6U);
+            UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), 176U, 1U, UI_DIM, UI_BG, kind);
+            /* شماره */
+            char b[12];
+            snprintf(b, sizeof b, "%u/%u", (unsigned)(idx + 1U), (unsigned)SENSOR_COUNT);
+            w = (uint16_t)(strlen(b) * 12U);
+            UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), 192U, 2U, th->light, UI_BG, b);
+            /* مثلث‌های چپ/راست */
+            for (int r = -10; r <= 10; r++)
+            {
+                int a = (r < 0) ? -r : r;
+                uint16_t ww = (uint16_t)(14 - (a * 14) / 10 + 1);
+                LCD_FillRect((uint16_t)(30U - ww), (uint16_t)(100 + r), ww, 1U, th->accent);
+                LCD_FillRect(210U, (uint16_t)(100 + r), ww, 1U, th->accent);
+            }
+            UI_Hint("L/R sensor  OK open");
+        }
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        if (in == MENU_INPUT_RIGHT || in == MENU_INPUT_DOWN) { idx = (uint8_t)((idx + 1U) % SENSOR_COUNT); redraw = 1U; }
+        if (in == MENU_INPUT_LEFT  || in == MENU_INPUT_UP)   { idx = (idx == 0U) ? (uint8_t)(SENSOR_COUNT - 1U) : (uint8_t)(idx - 1U); redraw = 1U; }
+        if (in == MENU_INPUT_SELECT) { SensorRun(idx); redraw = 1U; }
+    }
+}
 
 /* ================================================================== */
 /*  Logic analyzer (مثل نگارخودرو): تشخیص سطح 12V / 5V / 3.3V / GND / SIG   */

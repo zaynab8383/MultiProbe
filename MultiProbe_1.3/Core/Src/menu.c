@@ -26,6 +26,7 @@ static const MenuScreen_t *s_stack[MENU_MAX_DEPTH];
 static uint8_t s_depth = 0U;
 static uint8_t s_cursor = 0U;
 static uint8_t s_dirty = 1U;
+static uint8_t s_top = 0U;      /* اولین ردیف دیده‌شده (اسکرول) */
 
 static const MenuScreen_t *Current(void)
 {
@@ -36,6 +37,7 @@ void Menu_Init(const MenuScreen_t *rootScreen)
 {
     s_depth = 0U;
     s_cursor = 0U;
+    s_top = 0U;
     s_stack[s_depth++] = rootScreen;
     s_dirty = 1U;
 }
@@ -46,6 +48,7 @@ void Menu_Push(const MenuScreen_t *screen)
     {
         s_stack[s_depth++] = screen;
         s_cursor = 0U;
+        s_top = 0U;
         s_dirty = 1U;
     }
 }
@@ -56,6 +59,7 @@ void Menu_Pop(void)
     {
         s_depth--;
         s_cursor = 0U;
+        s_top = 0U;
         s_dirty = 1U;
     }
 }
@@ -109,8 +113,14 @@ void Menu_Draw(void)
     LCD_FillRect(0U, MENU_Y0, LCD_WIDTH, ROW_HEIGHT - 1U, th->accent);
     LCD_DrawString(8U, (uint16_t)(MENU_Y0 + 2U), scr->title, COLOR_TEXT, th->accent, TEXT_SCALE);
 
+    /* تعداد ردیف قابل نمایش و اسکرول: ردیف انتخابی همیشه دیده می‌شه */
+    uint8_t vis = (uint8_t)((LCD_HEIGHT - MENU_Y0 - ROW_HEIGHT) / ROW_HEIGHT);
+    if (vis == 0U) vis = 1U;
+    if (s_cursor < s_top) s_top = s_cursor;
+    if (s_cursor >= (uint8_t)(s_top + vis)) s_top = (uint8_t)(s_cursor - vis + 1U);
+
     uint16_t y = (uint16_t)(MENU_Y0 + ROW_HEIGHT);
-    for (uint8_t i = 0U; i < scr->count; i++)
+    for (uint8_t i = s_top; i < scr->count && i < (uint8_t)(s_top + vis); i++)
     {
         uint8_t  sel = (i == s_cursor);
         uint16_t bg  = sel ? th->dark : COLOR_BG;
@@ -120,8 +130,10 @@ void Menu_Draw(void)
         if (sel) LCD_FillRect(0U, y, 5U, ROW_HEIGHT, th->accent);          /* نشانه‌ی کنار آیتم انتخابی */
         LCD_DrawString(16U, (uint16_t)(y + 4U), scr->items[i].name, fg, bg, TEXT_SCALE);
         y = (uint16_t)(y + ROW_HEIGHT);
-        if (y >= LCD_HEIGHT) break;   /* صفحه پر شد */
     }
+    /* فلش‌های اسکرول */
+    if (s_top > 0U) LCD_DrawString(222U, (uint16_t)(MENU_Y0 + ROW_HEIGHT + 4U), "^", COLOR_TEXT, COLOR_BG, TEXT_SCALE);
+    if ((uint8_t)(s_top + vis) < scr->count) LCD_DrawString(222U, (uint16_t)(y - ROW_HEIGHT + 4U), "v", COLOR_TEXT, COLOR_BG, TEXT_SCALE);
 }
 
 void Menu_Redraw(void)
