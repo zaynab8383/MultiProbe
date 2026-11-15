@@ -2,6 +2,7 @@
 #include "adc_probe.h"
 #include <string.h>
 
+extern TIM_HandleTypeDef  htim1;
 extern TIM_HandleTypeDef  htim15;
 extern ADC_HandleTypeDef  hadc1;
 extern ADC_HandleTypeDef  hadc2;
@@ -14,6 +15,7 @@ static const OhmRange_t k_ohm[OHM_RANGES] = OHM_RANGE_TABLE;
 #define RATIO_RD_PA6  6.1f
 #define RATIO_RD_PA2  6.1f
 #define RATIO_RD_PC1  6.1f
+#define RATIO_RD_PC4  13.6466f
 
 #define BURST_N   4096U
 static uint16_t s_buf[BURST_N];
@@ -142,12 +144,13 @@ static void src_info(ReadSrc_t s, ADC_HandleTypeDef **h, uint32_t *ch, float *ra
     case RD_PA6: *h = &hadc1; *ch = ADC_CHANNEL_3;  *ratio = RATIO_RD_PA6; break;
     case RD_PA2: *h = &hadc1; *ch = ADC_CHANNEL_14; *ratio = RATIO_RD_PA2; break;
     case RD_PC1: *h = &hadc2; *ch = ADC_CHANNEL_11; *ratio = RATIO_RD_PC1; break;
+    case RD_PC4: *h = &hadc1; *ch = ADC_CHANNEL_4; *ratio = RATIO_RD_PC4; break;
     }
 }
 
 const char *Probe_ReadName(ReadSrc_t s)
 {
-    static const char *const n[RD_COUNT] = { "PB1", "PA6", "PA2", "PC1" };
+    static const char *const n[RD_COUNT] = { "PB1", "PA6", "PA2", "PC1", "PC4" };
     return (s < RD_COUNT) ? n[s] : "?";
 }
 
@@ -167,7 +170,17 @@ uint32_t Probe_Capture(ReadSrc_t src, uint16_t *dst, uint32_t n)
     ADC_ChannelConfTypeDef cfg = {0};
     cfg.Channel      = ch;
     cfg.Rank         = ADC_REGULAR_RANK_1;
-    cfg.SamplingTime = ADC_SAMPLETIME_8CYCLES_5;
+    /* 8.5 سیکل خیلی کوتاهه برای امپدانس منبع این پروب‌ها (تقسیم‌کننده‌های
+     * ۱۰۰ک/۱M روی PA6/PA2/PC1/PC4): خازن S&H داخلی ADC کامل شارژ نمی‌شه و
+     * چند نمونه‌ی بعد از هر لبه به‌صورت یک "رمپ" RC به سمت مقدار واقعی
+     * می‌رسه -> دقیقاً همون چیزی که توی اسیلسکوپ به‌جای تخت‌بودن بالای موج
+     * مربعی دیده می‌شه. همون 64.5 سیکلی که بقیه‌ی adc_probe.c برای همین
+     * کانال‌ها استفاده می‌کنه رو این‌جا هم می‌ذاریم؛ سرعت کلی burst چون با
+     * overhead نرم‌افزاری HAL_ADC_Start/Poll غالب می‌شه تقریباً تغییری
+     * نمی‌کنه. */
+    /* PC4 = خروجی OPAMP (امپدانس پایین): همون 8.5 سیکلی که ولت‌متر (Adc_CapturePC4) استفاده می‌کنه
+       تا اسکوپ و ولت‌متر یک شکل موج ببینن. بقیه‌ی کانال‌ها (تقسیم‌کننده‌ی پر‌امپدانس) 64.5 می‌مونن. */
+    cfg.SamplingTime = (src == RD_PC4) ? ADC_SAMPLETIME_8CYCLES_5 : ADC_SAMPLETIME_64CYCLES_5;
     cfg.SingleDiff   = ADC_SINGLE_ENDED;
     cfg.OffsetNumber = ADC_OFFSET_NONE;
     if (HAL_ADC_ConfigChannel(h, &cfg) != HAL_OK) return 0U;
@@ -203,7 +216,7 @@ void Probe_MeasureGap(ReadSrc_t src, SigStat_t *o, uint32_t gap_cycles)
     ADC_ChannelConfTypeDef cfg = {0};
     cfg.Channel      = ch;
     cfg.Rank         = ADC_REGULAR_RANK_1;
-    cfg.SamplingTime = ADC_SAMPLETIME_8CYCLES_5;
+    cfg.SamplingTime = ADC_SAMPLETIME_64CYCLES_5;   /* همون دلیل بالا در Probe_Capture */
     cfg.SingleDiff   = ADC_SINGLE_ENDED;
     cfg.OffsetNumber = ADC_OFFSET_NONE;
     if (HAL_ADC_ConfigChannel(h, &cfg) != HAL_OK) return;
@@ -340,6 +353,87 @@ void Probe_OhmSelect(uint8_t range)
         sw(k_ohm[i].port, k_ohm[i].pin, (i == range) ? 1U : 0U);
 }
 
+
+/* ---------------- DAC sine generator (TIM1 update interrupt) ----------------
+ * TIM1 در نسخه فعلی برای خروجی پروب استفاده نشده؛ TIM15 همچنان PWM پروب‌هاست.
+ * 64 نمونه در هر پریود؛ TIM1 فقط به‌عنوان timebase/interrupt استفاده می‌شود.
+ */
+#define DAC_SINE_N 64U
+static const uint16_t s_sineLut[DAC_SINE_N] = {
+    2048, 2248, 2447, 2642, 2831, 3013, 3185, 3346, 3495, 3630, 3750, 3853, 3939, 4007, 4056, 4085, 4095, 4085, 4056, 4007, 3939, 3853, 3750, 3630, 3495, 3346, 3185, 3013, 2831, 2642, 2447, 2248, 2048, 1847, 1648, 1453, 1264, 1082, 910, 749, 600, 465, 345, 242, 156, 88, 39, 10, 0, 10, 39, 88, 156, 242, 345, 465, 600, 749, 910, 1082, 1264, 1453, 1648, 1847
+};
+
+static volatile uint8_t s_sineRunning = 0U;
+static volatile uint8_t s_sineIndex = 0U;
+static volatile uint16_t s_sineMid = 2048U;
+static volatile uint16_t s_sineAmp = 0U;
+
+uint8_t Probe_DacSineStart(uint32_t frequency_hz, float amplitude_v, float offset_v)
+{
+    if (frequency_hz < 1U || frequency_hz > 200U) return 0U;
+
+    float vdda = (g_vdda > 3.0f && g_vdda < 3.6f) ? g_vdda : 3.3f;
+    if (amplitude_v < 0.0f || offset_v < 0.0f) return 0U;
+    if ((offset_v - amplitude_v) < 0.05f) return 0U;
+    if ((offset_v + amplitude_v) > (vdda - 0.05f)) return 0U;
+
+    Probe_DacSineStop();
+    Probe_DacSwitch(1U, 0U);
+    Probe_DacSet(2U, offset_v);
+
+    s_sineMid = (uint16_t)((offset_v / vdda) * 4095.0f + 0.5f);
+    s_sineAmp = (uint16_t)((amplitude_v / vdda) * 4095.0f + 0.5f);
+    s_sineIndex = 0U;
+
+    uint32_t timclk = HAL_RCC_GetPCLK2Freq() * 2U;
+    uint32_t update_hz = frequency_hz * DAC_SINE_N;
+    uint32_t arr = timclk / update_hz;
+    if (arr < 2U) return 0U;
+    arr -= 1U;
+
+    __HAL_TIM_DISABLE(&htim1);
+    __HAL_TIM_SET_PRESCALER(&htim1, 0U);
+    __HAL_TIM_SET_AUTORELOAD(&htim1, arr);
+    __HAL_TIM_SET_COUNTER(&htim1, 0U);
+    __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+
+    HAL_NVIC_SetPriority(TIM1_UP_IRQn, 5U, 0U);
+    HAL_NVIC_EnableIRQ(TIM1_UP_IRQn);
+
+    if (HAL_DAC_Start(&hdac1, DAC_CHANNEL_2) != HAL_OK) return 0U;
+    Probe_DacSwitch(2U, 1U);
+    s_sineRunning = 1U;
+    if (HAL_TIM_Base_Start_IT(&htim1) != HAL_OK)
+    {
+        s_sineRunning = 0U;
+        Probe_DacSwitch(2U, 0U);
+        return 0U;
+    }
+    return 1U;
+}
+
+void Probe_DacSineStop(void)
+{
+    s_sineRunning = 0U;
+    (void)HAL_TIM_Base_Stop_IT(&htim1);
+    HAL_NVIC_DisableIRQ(TIM1_UP_IRQn);
+    Probe_DacSwitch(2U, 0U);
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if ((htim->Instance == TIM1) && s_sineRunning)
+    {
+        uint32_t lut = s_sineLut[s_sineIndex];
+        int32_t centered = (int32_t)lut - 2048;
+        int32_t code = (int32_t)s_sineMid + (centered * (int32_t)s_sineAmp) / 2047;
+        if (code < 0) code = 0;
+        if (code > 4095) code = 4095;
+        (void)HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_2, DAC_ALIGN_12B_R, (uint32_t)code);
+        s_sineIndex = (uint8_t)((s_sineIndex + 1U) & (DAC_SINE_N - 1U));
+    }
+}
+
 /* ---------------- DAC ---------------- */
 
 void Probe_DacSwitch(uint8_t ch, uint8_t on)
@@ -362,6 +456,7 @@ void Probe_DacSet(uint8_t ch, float volts)
 
 void Probe_DacOff(void)
 {
+    Probe_DacSineStop();
     Probe_DacSwitch(1U, 0U);
     Probe_DacSwitch(2U, 0U);
     (void)HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, 0U);

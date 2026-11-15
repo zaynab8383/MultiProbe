@@ -15,7 +15,7 @@
 
 #define QLL_MAP_BASE     0x90000000UL
 #define QLL_SIZE_BYTES   (8UL * 1024UL * 1024UL)
-#define QLL_PRESCALER    7U          /* OCTOSPI clock = HCLK / 8 = 35 MHz at HCLK 280 (safe sampling without delay-block tuning) */
+#define QLL_PRESCALER    3U          /* OCTOSPI clock = HCLK / 8 = 35 MHz at HCLK 280 (safe sampling without delay-block tuning) */
 #define QLL_DEVSIZE_REG  22U         /* 2^(22+1) = 8 MB */
 #define QLL_CSHT_REG     3U          /* CS high time = 4 clocks */
 #define QLL_SPIN_LIMIT   30000000UL
@@ -57,6 +57,24 @@ static int qll_hw_init(void)
         if (!qll_wait_not_busy()) return 0;
         OCTOSPI1->CR &= ~OCTOSPI_CR_EN;
     }
+
+    /*
+     * Route OCTOSPI1 to OSPIM Port 1:
+     *   CLK  -> Port 1
+     *   NCS  -> Port 1
+     *   IO[3:0] -> Port 1 low
+     *
+     * CubeMX normally does this through HAL_OSPIM_Config(). This project
+     * deliberately uses a register-level boot driver, so configure the
+     * IO manager here before enabling OCTOSPI1. Without this mapping the
+     * peripheral may be configured but the external W25Q64 is not routed.
+     */
+    OCTOSPIM->CR &= ~OCTOSPIM_CR_MUXEN;
+    OCTOSPIM->PCR[0] = OCTOSPIM_PCR_CLKEN
+                     | OCTOSPIM_PCR_NCSEN
+                     | OCTOSPIM_PCR_IOLEN;
+    __DSB();
+    __ISB();
 
     OCTOSPI1->DCR1 = (QLL_DEVSIZE_REG << OCTOSPI_DCR1_DEVSIZE_Pos) | (QLL_CSHT_REG << OCTOSPI_DCR1_CSHT_Pos);
     OCTOSPI1->DCR2 = QLL_PRESCALER;

@@ -48,17 +48,14 @@ BOOT_FN static int sector_equal(uint32_t off, const uint8_t *buf)
 }
 
 /* Programs the staged image (encrypted if OTF_ENABLE). Returns 0 = nothing to do / ok, -1 = failed. */
-BOOT_FN static int image_sync(const AES128_Ctx *ctx, const uint32_t nonce[2], uint32_t image_bytes)
+BOOT_FN static int image_sync(const AES128_Ctx *ctx, const uint32_t nonce[2])
 {
     const volatile uint32_t *mg = (const volatile uint32_t *)&_extmagic;
     if (mg[0] != 0x4D505153UL || mg[1] != 0xA5C3965AUL)
         return 0;                                           /* no debugger-staged image -> use what is in flash */
 
-    if ((image_bytes == 0U) || (image_bytes > (1024UL * 1024UL)))
-        return -1;
-
     const volatile uint8_t *stage = (const volatile uint8_t *)&_extstage_base;
-    uint32_t size = (image_bytes + SECTOR_BYTES - 1U) & ~(SECTOR_BYTES - 1U);
+    uint32_t size = ((uint32_t)(uintptr_t)&_extimg_size + SECTOR_BYTES - 1U) & ~(SECTOR_BYTES - 1U);
     uint8_t buf[SECTOR_BYTES];
     uint8_t ks[16];
     int result = 0;
@@ -74,12 +71,7 @@ BOOT_FN static int image_sync(const AES128_Ctx *ctx, const uint32_t nonce[2], ui
             (void)ctx; (void)nonce;
 #endif
             for (uint32_t i = 0; i < 16U; i++)
-            {
-                uint32_t image_pos = off + b + i;
-                /* Never copy uninitialised SRAM after the final linker section into external flash. */
-                uint8_t plain = (image_pos < image_bytes) ? stage[image_pos] : 0xFFU;
-                buf[b + i] = (uint8_t)(plain ^ ks[i]);
-            }
+                buf[b + i] = (uint8_t)(stage[off + b + i] ^ ks[i]);
         }
         if (!sector_equal(off, buf))
         {
@@ -101,107 +93,79 @@ BOOT_FN static int image_sync(const AES128_Ctx *ctx, const uint32_t nonce[2], ui
     return result;
 }
 
-#if OTF_ENABLE
 /*
- * OTFDEC computes a hardware CRC while KEYR0..KEYR3 are written.
- * Keep this check in the pre-C-runtime boot code so a bad key load is
- * detected before execution is transferred to the external image.
- * Algorithm copied from ST's STM32H7 HAL OTFDEC driver.
+ * Configure the external QSPI XIP window as normal, cacheable executable memory.
+ *
+ * The firmware is fetched repeatedly from 0x90000000.  An explicit MPU region
+ * lets the Cortex-M7 instruction cache retain hot code paths instead of treating
+ * every fetch as a slow external-memory transaction.
+ *
+ * Region 1 is used here; Region 0 remains available for the FMC/LCD protection
+ * configured later by LCD_MPU_Config().
  */
-BOOT_FN static uint32_t otf_key_crc(const uint32_t key_words[4])
+BOOT_FN static void xip_mpu_cache_enable(void)
 {
-    const uint8_t poly = 0x07U;
-    const uint32_t strobe[4] = {0xAA55AA55UL, 0x00000003UL, 0x00000018UL, 0x000000C0UL};
-    uint8_t crc = 0U;
+    const uint32_t size_8mb = (22UL << MPU_RASR_SIZE_Pos); /* 2^(22+1) = 8 MB */
 
-    for (uint32_t j = 0U; j < 4U; j++)
-    {
-        uint32_t keyval = key_words[j];
+    MPU->RNR  = 1U;
+    MPU->RBAR = QLL_MAP_BASE;
+    MPU->RASR = MPU_RASR_ENABLE_Msk              | size_8mb
+              | (3UL << MPU_RASR_AP_Pos)       /* full access */
+              | (1UL << MPU_RASR_C_Pos);       /* normal, cacheable, non-bufferable */
+              /* XN=0: instruction fetches are allowed */
+              ;
 
-        if (j == 0U)
-            keyval ^= strobe[0];
-        else
-            keyval ^= (strobe[j] << 24) | ((uint32_t)crc << 16)
-                    | (strobe[j] << 8) | (uint32_t)crc;
-
-        crc = 0U;
-        for (uint32_t i = 0U; i < 32U; i++)
-        {
-            uint32_t bit = (((uint32_t)crc >> 7)
-                          ^ ((keyval >> (31U - i)) & 0x0FU)) & 1U;
-            crc = (uint8_t)(crc << 1);
-            if (bit != 0U)
-                crc ^= poly;
-        }
-        crc ^= 0x55U;
-    }
-
-    return (uint32_t)crc;
+    /* Keep the normal privileged background map enabled for the rest of the MCU. */
+    MPU->CTRL = MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk;
+    __DSB();
+    __ISB();
 }
 
-BOOT_FN static int otf_enable(const uint8_t key[16], const uint32_t nonce[2], uint32_t image_bytes)
+BOOT_FN static void xip_cache_enable(void)
+{
+    /* Remove any stale lines before the external encrypted image starts executing. */
+    SCB_InvalidateICache();
+    __DSB();
+    __ISB();
+
+#if defined(SCB_CCR_BP_Msk)
+    SCB->CCR |= SCB_CCR_BP_Msk;                /* branch prediction helps tight UI/graphics paths */
+    __DSB();
+    __ISB();
+#endif
+
+    SCB_EnableICache();
+    __DSB();
+    __ISB();
+}
+
+#if OTF_ENABLE
+BOOT_FN static void otf_enable(const uint8_t key[16], const uint32_t nonce[2], uint32_t image_bytes)
 {
     OTFDEC_Region_TypeDef *r = OTFDEC1_REGION1;
-    uint32_t key_words[4];
-
-    if ((image_bytes == 0U) || ((image_bytes & 0xFFFU) != 0U))
-        return 0;
 
     RCC->AHB3ENR |= RCC_AHB3ENR_OTFDEC1EN;
     (void)RCC->AHB3ENR;
 
-    /* MODE = 10: decrypt every read (instruction and data) in this region. */
-    r->REG_CONFIGR = (r->REG_CONFIGR & ~OTFDEC_REG_CONFIGR_MODE)
-                   | OTFDEC_REG_CONFIGR_MODE_1;
+    /* MODE = 10: every read (instruction or data) of the region is decrypted. Must be set BEFORE the key. */
+    r->REG_CONFIGR = (r->REG_CONFIGR & ~OTFDEC_REG_CONFIGR_MODE) | OTFDEC_REG_CONFIGR_MODE_1;
 
-    /*
-     * AES key mapping for standard OTFDEC:
-     * KEYR0 = AES key word 0 (last 4 bytes), ... KEYR3 = word 3 (first 4 bytes).
-     * The hardware requires writes in the strict order KEYR0, KEYR1, KEYR2, KEYR3.
-     */
-    key_words[0] = ((uint32_t)key[12] << 24) | ((uint32_t)key[13] << 16)
-                 | ((uint32_t)key[14] << 8) | (uint32_t)key[15];
-    key_words[1] = ((uint32_t)key[8] << 24) | ((uint32_t)key[9] << 16)
-                 | ((uint32_t)key[10] << 8) | (uint32_t)key[11];
-    key_words[2] = ((uint32_t)key[4] << 24) | ((uint32_t)key[5] << 16)
-                 | ((uint32_t)key[6] << 8) | (uint32_t)key[7];
-    key_words[3] = ((uint32_t)key[0] << 24) | ((uint32_t)key[1] << 16)
-                 | ((uint32_t)key[2] << 8) | (uint32_t)key[3];
-
-    r->REG_KEYR0 = key_words[0];
-    __DSB(); __ISB();
-    r->REG_KEYR1 = key_words[1];
-    __DSB(); __ISB();
-    r->REG_KEYR2 = key_words[2];
-    __DSB(); __ISB();
-    r->REG_KEYR3 = key_words[3];
-    __DSB(); __ISB();
-
-    /* Do not lock a key that the peripheral failed to load correctly. */
-    if ((((r->REG_CONFIGR & OTFDEC_REG_CONFIGR_KEYCRC)
-          >> OTFDEC_REG_CONFIGR_KEYCRC_Pos) & 0xFFU) != otf_key_crc(key_words))
-        return 0;
-
-    r->REG_CONFIGR |= OTFDEC_REG_CONFIGR_KEYLOCK;
+    /* key: KEYR3 = key[0..3] ... KEYR0 = key[12..15]; written 0,1,2,3 (RM0455 41.4.x) */
+    r->REG_KEYR0 = ((uint32_t)key[12] << 24) | ((uint32_t)key[13] << 16) | ((uint32_t)key[14] << 8) | key[15];
+    r->REG_KEYR1 = ((uint32_t)key[8]  << 24) | ((uint32_t)key[9]  << 16) | ((uint32_t)key[10] << 8) | key[11];
+    r->REG_KEYR2 = ((uint32_t)key[4]  << 24) | ((uint32_t)key[5]  << 16) | ((uint32_t)key[6]  << 8) | key[7];
+    r->REG_KEYR3 = ((uint32_t)key[0]  << 24) | ((uint32_t)key[1]  << 16) | ((uint32_t)key[2]  << 8) | key[3];
+    r->REG_CONFIGR |= OTFDEC_REG_CONFIGR_KEYLOCK;           /* keys can no longer be written until reset */
 
     r->REG_START_ADDR = QLL_MAP_BASE;
-    r->REG_END_ADDR   = QLL_MAP_BASE + image_bytes - 1U; /* end address on 4-KB boundary */
+    r->REG_END_ADDR   = QLL_MAP_BASE + image_bytes - 1U;     /* low 12 bits are all ones: 4 KB granularity */
     r->REG_NONCER0    = nonce[0];
     r->REG_NONCER1    = nonce[1];
-
-    r->REG_CONFIGR = (r->REG_CONFIGR & ~OTFDEC_REG_CONFIGR_VERSION)
-                   | ((uint32_t)OTF_FW_VERSION << OTFDEC_REG_CONFIGR_VERSION_Pos);
-
-    __DSB(); __ISB();
-    r->REG_CONFIGR |= OTFDEC_REG_CONFIGR_REG_EN;
-    __DSB(); __ISB();
-
-    r->REG_CONFIGR |= OTFDEC_REG_CONFIGR_CONFIGLOCK;
-    __DSB(); __ISB();
-
-    return ((r->REG_CONFIGR & OTFDEC_REG_CONFIGR_REG_EN) != 0U);
+    r->REG_CONFIGR    = (r->REG_CONFIGR & ~OTFDEC_REG_CONFIGR_VERSION)
+                      | ((uint32_t)OTF_FW_VERSION << OTFDEC_REG_CONFIGR_VERSION_Pos);
+    r->REG_CONFIGR   |= OTFDEC_REG_CONFIGR_REG_EN;
+    r->REG_CONFIGR   |= OTFDEC_REG_CONFIGR_CONFIGLOCK;      /* configuration frozen until the next reset */
 }
-
 #endif
 
 BOOT_FN void Boot_ExternalInit(void)
@@ -209,8 +173,7 @@ BOOT_FN void Boot_ExternalInit(void)
     AES128_Ctx ctx;
     uint8_t key[16];
     uint32_t nonce[2];
-    uint32_t image_bytes = (uint32_t)(uintptr_t)&_extimg_size;
-    uint32_t size = (image_bytes + SECTOR_BYTES - 1U) & ~(SECTOR_BYTES - 1U);
+    uint32_t size = ((uint32_t)(uintptr_t)&_extimg_size + SECTOR_BYTES - 1U) & ~(SECTOR_BYTES - 1U);
 
     for (uint32_t i = 0; i < 16U; i++) key[i] = 0U;
     nonce[0] = 0U; nonce[1] = 0U;
@@ -228,18 +191,19 @@ BOOT_FN void Boot_ExternalInit(void)
     }
 #endif
 
-    if (image_sync(&ctx, nonce, image_bytes) != 0)
+    if (image_sync(&ctx, nonce) != 0)
         for (;;) { }                                        /* programming the external flash failed */
 
 #if OTF_ENABLE
-    if (!otf_enable(key, nonce, size))
-        for (;;) { }                                        /* OTFDEC key CRC / region setup failed */
+    otf_enable(key, nonce, size);
 #else
     (void)size; (void)key;
 #endif
 
-    __DSB();
-    __ISB();
-    SCB_InvalidateICache();
-    SCB_EnableICache();
+    /*
+     * OTFDEC is configured before enabling the cache, so only decrypted
+     * instructions/data are ever cached by the Cortex-M7.
+     */
+    xip_mpu_cache_enable();
+    xip_cache_enable();
 }

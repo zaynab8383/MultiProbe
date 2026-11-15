@@ -614,42 +614,69 @@ static void App_Pwm(void)
 static void App_Dac(void)
 {
     LEDs_AllOff();
-    UI_Begin("DAC OUT");
-    UI_Hint("U/D volt L/R ch OK on/off");
+    UI_Begin("DAC2 SINE");
+    UI_Hint("U/D freq L/R amp OK on/off");
 
-    uint8_t ch = 1U, on[3] = { 0U, 0U, 0U };
-    float   v[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t freq = 50U;
+    float amplitude = 0.50f;
+    const float offset = 1.65f;
+    uint8_t running = 0U;
     uint8_t redraw = 1U;
     uint32_t last = 0U - 1000U;
 
-    Probe_DacSet(1U, 0.0f);
-    Probe_DacSet(2U, 0.0f);
+    Probe_DacOff();
+    running = Probe_DacSineStart(freq, amplitude, offset);
 
     for (;;)
     {
         MenuInput_t in = UI_Poll();
         if (in == MENU_INPUT_BACK) break;
 
-        if (in == MENU_INPUT_LEFT || in == MENU_INPUT_RIGHT) { ch = (ch == 1U) ? 2U : 1U; redraw = 1U; }
-        if (in == MENU_INPUT_UP)   { v[ch] += 0.1f; if (v[ch] > 3.3f) v[ch] = 3.3f; Probe_DacSet(ch, v[ch]); redraw = 1U; }
-        if (in == MENU_INPUT_DOWN) { v[ch] -= 0.1f; if (v[ch] < 0.0f) v[ch] = 0.0f; Probe_DacSet(ch, v[ch]); redraw = 1U; }
-        if (in == MENU_INPUT_SELECT) { on[ch] = !on[ch]; Probe_DacSwitch(ch, on[ch]); redraw = 1U; }
+        if (in == MENU_INPUT_UP)
+        {
+            if (freq < 200U) freq += 1U;
+            if (running) { Probe_DacSineStop(); running = Probe_DacSineStart(freq, amplitude, offset); }
+            redraw = 1U;
+        }
+        if (in == MENU_INPUT_DOWN)
+        {
+            if (freq > 1U) freq -= 1U;
+            if (running) { Probe_DacSineStop(); running = Probe_DacSineStart(freq, amplitude, offset); }
+            redraw = 1U;
+        }
+        if (in == MENU_INPUT_RIGHT)
+        {
+            amplitude += 0.05f;
+            if (amplitude > 0.75f) amplitude = 0.75f;
+            if (running) { Probe_DacSineStop(); running = Probe_DacSineStart(freq, amplitude, offset); }
+            redraw = 1U;
+        }
+        if (in == MENU_INPUT_LEFT)
+        {
+            amplitude -= 0.05f;
+            if (amplitude < 0.10f) amplitude = 0.10f;
+            if (running) { Probe_DacSineStop(); running = Probe_DacSineStart(freq, amplitude, offset); }
+            redraw = 1U;
+        }
+        if (in == MENU_INPUT_SELECT)
+        {
+            if (running) { Probe_DacSineStop(); running = 0U; }
+            else running = Probe_DacSineStart(freq, amplitude, offset);
+            redraw = 1U;
+        }
 
         if (redraw || TICK_DUE(last, 300U))
         {
             redraw = 0U;
             last = HAL_GetTick();
-            char b[32], t[16];
-            snprintf(b, sizeof b, "Channel DAC%u", (unsigned)ch);            UI_Row(0U, UI_FG, UI_BG, b);
-            UI_FmtFixed(t, sizeof t, v[ch], 2);
-            snprintf(b, sizeof b, "Pin %s V", t);                            UI_Row(1U, UI_FG, UI_BG, b);
-            UI_FmtFixed(t, sizeof t, v[ch] * DAC_GAIN, 2);
-            snprintf(b, sizeof b, "Out %s V", t);                            UI_Row(2U, UI_FG, UI_BG, b);
-            snprintf(b, sizeof b, "Switch %s", on[ch] ? "ON" : "OFF");       UI_Row(3U, on[ch] ? UI_OK : UI_FG, UI_BG, b);
-            UI_FmtFixed(t, sizeof t, Probe_ReadVolts(RD_PB1), 2);
-            snprintf(b, sizeof b, "PB1 %s V", t);                            UI_Row(5U, UI_CYAN, UI_BG, b);
-            UI_FmtFixed(t, sizeof t, Probe_ReadVolts(RD_PA6), 2);
-            snprintf(b, sizeof b, "PA6 %s V", t);                            UI_Row(6U, UI_ORANGE, UI_BG, b);
+            char b[40], t[16];
+            snprintf(b, sizeof b, "Output: Probe2 / DAC2"); UI_Row(0U, UI_CYAN, UI_BG, b);
+            snprintf(b, sizeof b, "Frequency: %lu Hz", (unsigned long)freq); UI_Row(1U, UI_FG, UI_BG, b);
+            UI_FmtFixed(t, sizeof t, amplitude, 2);
+            snprintf(b, sizeof b, "Amplitude: +/- %s V", t); UI_Row(2U, UI_FG, UI_BG, b);
+            UI_Row(3U, running ? UI_OK : UI_FG, UI_BG, running ? "SINE RUNNING" : "OUTPUT STOPPED");
+            UI_Row(5U, UI_DIM, UI_BG, "Offset: 1.65 V");
+            UI_Row(6U, UI_DIM, UI_BG, "Probe1 -> Scope / PC4");
         }
     }
     Probe_DacOff();
@@ -873,17 +900,24 @@ static void sc_col_bg(uint16_t x, uint16_t ya, uint16_t yb)
     if (ya < yb) LCD_FillRect(x, ya, 1U, (uint16_t)(yb - ya), 0x0000U);
 }
 
-static void App_Scope(void)
+__attribute__((unused)) static void App_ScopeOld(void)
 {
     LEDs_AllOff();
-    UI_Begin("SCOPE");
+    UI_Begin("SCOPE - P2 SINE TEST");
     UI_Hint("U/D src L/R zoom OK filter");
+
+    /* Loopback test: keep DAC2 sine active while the scope samples Probe1.
+       DAC2 output: 50 Hz, 0.50 V peak, 1.65 V offset. */
+    uint8_t testSineRunning = Probe_DacSineStart(50U, 0.50f, 1.65f);
+    UI_Row(0U, testSineRunning ? UI_OK : UI_ORANGE, UI_BG,
+           testSineRunning ? "P2 SINE: 50Hz +/-0.50V" : "P2 SINE START FAILED");
+
     LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
 
     static const uint8_t zoom[] = { 1U, 2U, 4U, 8U, 16U };
     uint8_t zi = 1U;
     uint8_t filt = 1U;
-    ReadSrc_t src = RD_PB1;
+    ReadSrc_t src = RD_PB1;   /* Probe1 (U7A) */
     uint32_t last = 0U - 1000U;
 
     for (;;)
@@ -893,7 +927,7 @@ static void App_Scope(void)
         if (in == MENU_INPUT_RIGHT) zi = (uint8_t)((zi + 1U) % sizeof(zoom));
         if (in == MENU_INPUT_LEFT)  zi = (uint8_t)((zi + sizeof(zoom) - 1U) % sizeof(zoom));
         if (in == MENU_INPUT_SELECT) filt = (uint8_t)!filt;
-        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN) src = (src == RD_PB1) ? RD_PA6 : RD_PB1;
+        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN) src = (src == RD_PB1) ? RD_PA6 : (src == RD_PA6) ? RD_PA2 : (src == RD_PA2) ? RD_PC1 : (src == RD_PC1) ? RD_PC4 : RD_PB1;
         if (!TICK_DUE(last, 120U)) continue;
         last = HAL_GetTick();
 
@@ -971,6 +1005,123 @@ static void App_Scope(void)
         UI_Text(2U, 204U, 1U, UI_DIM, UI_BG, b);
         LED_Blue_Set(span > 2000U);
     }
+    /* Stop the generator only when leaving the scope page. */
+    Probe_DacOff();
+    LEDs_AllOff();
+}
+
+/* ---- اسکوپ: صفحه‌ی مستقل ، ولی با همون نمونه‌برداری PC4 ی که توی ولت‌متر درست کار می‌کنه ---- */
+static void App_Scope(void)
+{
+    LEDs_AllOff();
+    UI_Begin("SCOPE");
+    UI_Hint("L/R zoom U/D rate OK hold");
+    uint8_t sineOn = Probe_DacSineStart(50U, 0.50f, 1.65f);   /* سینوس DAC2 روی Probe2 */
+    LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
+
+    static const uint16_t k_tbUs[] = { 0U, 2U, 5U, 10U, 20U, 50U, 100U, 200U };
+    static const uint8_t  k_zm[]   = { 1U, 2U, 4U, 8U, 16U };
+    uint8_t  tb = 0U, zi = 0U, hold = 0U;
+    uint32_t autoGapUs = VM_AUTO_DEF_US;
+    uint32_t last = 0U - 1000U;
+
+    for (;;)
+    {
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        if (in == MENU_INPUT_RIGHT && zi + 1U < sizeof(k_zm)) { zi++; last = 0U - 1000U; }
+        if (in == MENU_INPUT_LEFT  && zi > 0U)                { zi--; last = 0U - 1000U; }
+        if (in == MENU_INPUT_UP   && tb + 1U < (sizeof(k_tbUs) / sizeof(k_tbUs[0]))) { tb++; last = 0U - 1000U; }
+        if (in == MENU_INPUT_DOWN && tb > 0U)                 { tb--; last = 0U - 1000U; }
+        if (in == MENU_INPUT_SELECT) hold = (uint8_t)!hold;
+        if (hold || !TICK_DUE(last, 100U)) continue;
+        last = HAL_GetTick();
+
+        uint32_t gapUs = (tb == 0U) ? autoGapUs : (uint32_t)k_tbUs[tb];
+        uint32_t gap   = (SystemCoreClock / 1000000U) * gapUs;
+        uint32_t cyc   = Adc_CapturePC4(s_vmBuf, VM_N, gap);
+        if (cyc == 0U) continue;
+
+        uint32_t mn = 65535U, mx = 0U;
+        for (uint32_t i = 0U; i < VM_N; i++)
+        {
+            if (s_vmBuf[i] < mn) mn = s_vmBuf[i];
+            if (s_vmBuf[i] > mx) mx = s_vmBuf[i];
+        }
+        float vLo = vm_counts_to_vin(mn), vHi = vm_counts_to_vin(mx);
+        uint8_t sig = ((vHi - vLo) > VM_SIG_SPAN_V) ? 1U : 0U;
+
+        uint32_t start = 0U;
+        if (sig)
+        {
+            uint32_t mid = (mn + mx) / 2U;
+            for (uint32_t i = 1U; i < VM_TRIG_ZONE; i++)
+                if (s_vmBuf[i - 1U] < mid && s_vmBuf[i] >= mid) { start = i; break; }
+        }
+
+        float    vtop  = vm_pick_scale(vHi);
+        uint32_t nShow = VM_SHOW / (uint32_t)k_zm[zi];
+        const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
+        uint16_t prevY = 0xFFFFU;
+
+        for (uint16_t x = 0U; x < LCD_WIDTH; x++)
+        {
+            uint32_t a = start + ((uint32_t)x * nShow) / LCD_WIDTH;
+            uint32_t e = start + ((uint32_t)(x + 1U) * nShow) / LCD_WIDTH;
+            if (e <= a) e = a + 1U;
+            if (e > VM_N) e = VM_N;
+            if (a >= VM_N) a = VM_N - 1U;
+            uint16_t lo = 65535U, hi = 0U;
+            for (uint32_t i = a; i < e; i++)
+            {
+                if (s_vmBuf[i] < lo) lo = s_vmBuf[i];
+                if (s_vmBuf[i] > hi) hi = s_vmBuf[i];
+            }
+            float fh = vm_counts_to_vin(hi) / vtop, fl = vm_counts_to_vin(lo) / vtop;
+            if (fh > 1.0f) fh = 1.0f; if (fl > 1.0f) fl = 1.0f;
+            uint16_t yTop = (uint16_t)(yMax - (uint16_t)(fh * (float)(SCOPE_H - 1U)));
+            uint16_t yBot = (uint16_t)(yMax - (uint16_t)(fl * (float)(SCOPE_H - 1U)));
+            if (prevY != 0xFFFFU) { if (prevY < yTop) yTop = prevY; if (prevY > yBot) yBot = prevY; }
+            if (yBot <= yTop) { if (yBot < yMax) yBot++; else yTop--; }
+            prevY = (uint16_t)(yMax - (uint16_t)(vm_counts_to_vin(s_vmBuf[e - 1U]) / vtop * (float)(SCOPE_H - 1U)));
+            if (prevY < yMin) prevY = yMin;
+            sc_col_bg(x, yMin, yTop);
+            LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
+            sc_col_bg(x, (uint16_t)(yBot + 1U), (uint16_t)(yMax + 1U));
+        }
+
+        float hz = 0.0f, duty = 0.0f; uint8_t tooFast = 0U;
+        uint8_t fok = sig ? vm_analyze((uint16_t)mn, (uint16_t)mx, cyc, &hz, &duty, &tooFast) : 0U;
+        if (tb == 0U)
+        {
+            if (!sig) autoGapUs = VM_AUTO_DEF_US;
+            else if (fok)
+            {
+                float dtS   = ((float)cyc / (float)SystemCoreClock) / (float)VM_N;
+                float baseS = dtS - (float)gapUs * 1.0e-6f;
+                if (baseS < 1.0e-7f) baseS = 1.0e-7f;
+                float g = (VM_AUTO_PERIODS / (hz * (float)VM_SHOW) - baseS) * 1.0e6f;
+                if (g < 0.0f) g = 0.0f;
+                if (g > (float)VM_AUTO_MAX_US) g = (float)VM_AUTO_MAX_US;
+                uint32_t gn = (uint32_t)(g + 0.5f);
+                uint32_t df = (gn > autoGapUs) ? (gn - autoGapUs) : (autoGapUs - gn);
+                if (df * 4U > autoGapUs + 2U) autoGapUs = gn;
+            }
+            else if (tooFast) autoGapUs = 0U;
+            else { autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > VM_AUTO_MAX_US) autoGapUs = VM_AUTO_MAX_US; }
+        }
+
+        char b[40], t1[12], t2[12], t3[12];
+        UI_FmtFixed(t1, sizeof t1, vHi, 1U);
+        if (fok) { UI_FmtFixed(t2, sizeof t2, hz / 1000.0f, 2U); UI_FmtFixed(t3, sizeof t3, duty, 0U); }
+        else     { snprintf(t2, sizeof t2, "--"); snprintf(t3, sizeof t3, "--"); }
+        snprintf(b, sizeof b, "H%sV %skHz D%s%% %s   ", t1, t2, t3, sineOn ? "S" : "");
+        UI_Text(2U, 206U, 1U, UI_DIM, UI_BG, b);
+        snprintf(b, sizeof b, "TB:%s Z:x%u   ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi]);
+        UI_Text(2U, 218U, 1U, UI_DIM, UI_BG, b);
+        LED_Blue_Set(sig);
+    }
+    Probe_DacSineStop();
     LEDs_AllOff();
 }
 
@@ -1337,6 +1488,252 @@ static const MenuScreen_t s_simScreen = {
 static void App_SensorSim(void) { RunSubMenu(&s_simScreen); }
 
 /* ================================================================== */
+/*  Logic analyzer (مثل نگارخودرو): تشخیص سطح 12V / 5V / 3.3V / GND / SIG   */
+/*  + پایین صفحه: CAN-H ، CAN-L ، K-Line با شکل موجشون ؛ هرکدوم که روی       */
+/*  پروب دیده بشه سبز می‌شه.                                                */
+/* ================================================================== */
+#define LG_ROW_Y0   100U
+#define LG_ROW_H    36U
+
+/* شکل موج: هر ستون یک سطح (0 بالا ، 1 وسط ، 2 پایین) */
+static void lg_icon(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const uint8_t *lv, uint8_t n, uint16_t col)
+{
+    uint16_t sw = (uint16_t)(w / n);
+    uint16_t yy[3] = { y, (uint16_t)(y + h / 2U), (uint16_t)(y + h - 2U) };
+    for (uint8_t i = 0U; i < n; i++)
+    {
+        uint16_t xi = (uint16_t)(x + i * sw);
+        LCD_FillRect(xi, yy[lv[i]], sw, 2U, col);
+        if (i + 1U < n && lv[i + 1U] != lv[i])
+        {
+            uint16_t a = yy[lv[i]], b = yy[lv[i + 1U]];
+            uint16_t top = (a < b) ? a : b, hh = (uint16_t)((a < b) ? (b - a) : (a - b));
+            LCD_FillRect((uint16_t)(xi + sw - 1U), top, 2U, (uint16_t)(hh + 2U), col);
+        }
+    }
+}
+
+static void lg_box(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t c)
+{
+    LCD_FillRect(x, y, w, 1U, c);
+    LCD_FillRect(x, (uint16_t)(y + h - 1U), w, 1U, c);
+    LCD_FillRect(x, y, 1U, h, c);
+    LCD_FillRect((uint16_t)(x + w - 1U), y, 1U, h, c);
+}
+
+/* چیپ پایین صفحه: اسم باس + شکل موج ؛ فعال = سبز */
+static void lg_chip(uint8_t i, const char *name, const uint8_t *lv, uint8_t on)
+{
+    uint16_t x = (uint16_t)(4U + i * 78U), y = 186U;
+    LCD_FillRect(x, y, 74U, 46U, UI_BG);
+    lg_box(x, y, 74U, 46U, on ? UI_OK : UI_DIM);
+    UI_Text((uint16_t)(x + 6U), (uint16_t)(y + 4U), 1U, on ? UI_OK : UI_FG, UI_BG, name);
+    lg_icon((uint16_t)(x + 5U), (uint16_t)(y + 16U), 64U, 24U, lv, 8U, on ? UI_OK : UI_CYAN);
+}
+
+#define LG_X0   30U      /* جعبه‌ی وسط */
+#define LG_W    142U
+#define LG_RX   176U     /* ستون راست */
+#define LG_RW   60U
+
+static void App_Logic(void)
+{
+    LEDs_AllOff();
+    UI_Begin("LOGIC");
+    const uint16_t ac = UI_Theme()->accent;
+    static const uint8_t lvH[8] = { 1,0,0,1,0,0,1,1 };   /* CAN-H: 2.5V با پالس بالا   */
+    static const uint8_t lvL[8] = { 1,2,2,1,2,2,1,1 };   /* CAN-L: 2.5V با پالس پایین  */
+    static const uint8_t lvK[8] = { 0,2,0,0,2,2,0,0 };   /* K-Line: بالا با پالس به GND */
+    uint8_t hold[3] = { 0U, 0U, 0U };
+    uint8_t shown[3] = { 2U, 2U, 2U };
+    uint8_t frame = 0U;
+    uint32_t last = 0U - 1000U;
+
+    /* قاب‌های ثابت */
+    lg_box(LG_X0, 70U, LG_W, 48U, ac);                 /* عدد/اسم */
+    lg_box(LG_X0, 122U, LG_W, 58U, ac);                /* شکل موج */
+    lg_box(4U, 70U, 22U, 110U, ac);                    /* نوار سطح */
+    for (uint8_t i = 0U; i < 5U; i++) lg_box(LG_RX, (uint16_t)(70U + i * 22U), LG_RW, 22U, ac);
+
+    for (;;)
+    {
+        if (UI_Poll() == MENU_INPUT_BACK) break;
+        if (!TICK_DUE(last, 120U)) continue;
+        last = HAL_GetTick();
+
+        static const uint16_t k_gap[3] = { 0U, 20U, 150U };      /* µs: سریع (CAN) تا کند (K-Line) */
+        uint32_t gap = (SystemCoreClock / 1000000U) * (uint32_t)k_gap[frame % 3U];
+        frame++;
+        uint32_t cyc = Adc_CapturePC4(s_vmBuf, VM_N, gap);
+        if (cyc == 0U) continue;
+
+        uint32_t mn = 65535U, mx = 0U; uint64_t sum = 0U;
+        for (uint32_t i = 0U; i < VM_N; i++)
+        {
+            uint32_t v = s_vmBuf[i];
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+        }
+        float vLo = vm_counts_to_vin(mn), vHi = vm_counts_to_vin(mx);
+        float vAv = vm_counts_to_vin((uint32_t)(sum / VM_N));
+        float span = vHi - vLo;
+
+        uint8_t sig = (span > 0.8f) ? 1U : 0U;
+        uint8_t det[3] = { 0U, 0U, 0U };                         /* CAN-H ، CAN-L ، K-Line */
+        /* تعداد لبه‌ها (هیسترزیس ۴۰٪/۶۰٪): فقط یک پله/رمپ (مثل وصل‌کردن به 3.3V) باس حساب نمی‌شه */
+        uint32_t edges = 0U;
+        if (sig)
+        {
+            uint32_t th = mn + ((mx - mn) * 6U) / 10U, tl = mn + ((mx - mn) * 4U) / 10U;
+            uint8_t hi = (s_vmBuf[0] >= th) ? 1U : 0U;
+            for (uint32_t i = 1U; i < VM_N; i++)
+            {
+                uint32_t v = s_vmBuf[i];
+                if (!hi && v >= th)      { hi = 1U; edges++; }
+                else if (hi && v <= tl)  { hi = 0U; edges++; }
+            }
+        }
+        if (sig && edges >= 6U)
+        {
+            /* بازه‌ها با تلورانس ±10٪ :
+               K-Line  0..12V   | CAN-L 0..2.5V | CAN-H 2.5..5V */
+            if (vLo <= 1.2f && vHi >= 10.8f && vHi <= 13.2f)                    det[2] = 1U;
+            else if (vLo >= 2.25f && vLo <= 2.75f && vHi >= 4.5f && vHi <= 5.5f) det[0] = 1U;
+            else if (vLo <= 0.25f && vHi >= 2.25f && vHi <= 2.75f)              det[1] = 1U;
+        }
+        int8_t bus = -1;
+        for (uint8_t i = 0U; i < 3U; i++)
+        {
+            /* قفل: تا وقتی سطح DC با همون باس سازگاره (K-Line بیکار ≈ ولتاژ باتری ،
+               CAN بیکار ≈ 2.5V) اسم باس می‌مونه ؛ فقط وقتی سطح عوض شد کم‌کم پاک می‌شه */
+            uint8_t compat = (i == 2U) ? (vAv >= 6.0f)
+                           : (i == 0U) ? (vAv >= 2.25f && vAv <= 5.5f)
+                                       : (vAv >= 0.3f  && vAv <= 2.75f);
+            if (det[i]) hold[i] = 25U;
+            else if (hold[i] != 0U && !compat) hold[i]--;
+            else if (hold[i] != 0U && hold[i] < 25U) hold[i] = 25U;
+            if (hold[i] != 0U && bus < 0) bus = (int8_t)i;
+        }
+
+        const char *st; uint16_t sc;
+        if (sig)                                    { st = "SIG";  sc = UI_WHITE;  }
+        else if (vAv < 0.5f)                        { st = "GND";  sc = UI_CYAN;   }
+        else if (vAv >= 3.0f  && vAv <= 3.7f)       { st = "3.3V"; sc = UI_MAGENTA;}
+        else if (vAv >= 4.4f  && vAv <= 5.4f)       { st = "5V";   sc = UI_OK;     }
+        else if (vAv >= 10.0f && vAv <= 15.0f)      { st = "12V";  sc = UI_BAD;    }
+        else                                        { st = "--";   sc = UI_DIM;    }
+        if (sig) LEDs_AllOff(); else LEDs_UpdateVoltage(vAv);
+        LED_Blue_Set((uint8_t)(sig || (vAv < 0.5f)));
+
+        char t[12], b[16];
+
+        /* بالا: نوع سطح */
+        snprintf(b, sizeof b, "%-4s", st);
+        UI_Text(4U, 50U, 2U, sc, UI_BG, b);
+
+        /* وسط: اسم باس (زرد) یا ولتاژ (سفید) */
+        LCD_FillRect((uint16_t)(LG_X0 + 1U), 71U, (uint16_t)(LG_W - 2U), 46U, UI_BG);
+        if (bus >= 0)
+        {
+            const char *nm = (bus == 0) ? "CAN-H" : (bus == 1) ? "CAN-L" : "K-LINE";
+            uint16_t w = (uint16_t)(strlen(nm) * 18U);
+            UI_Text((uint16_t)(LG_X0 + (LG_W - w) / 2U), 80U, 3U, UI_TITLE, UI_BG, nm);
+        }
+        else
+        {
+            UI_FmtFixed(t, sizeof t, vAv, 2U);
+            uint16_t w = (uint16_t)(strlen(t) * 24U);
+            UI_Text((uint16_t)(LG_X0 + (LG_W - w) / 2U), 78U, 4U, UI_WHITE, UI_BG, t);
+        }
+
+        /* نوار سطح (چپ) */
+        {
+            float f = vAv / 15.0f; if (f > 1.0f) f = 1.0f;
+            uint16_t hh = (uint16_t)(f * 106.0f);
+            LCD_FillRect(5U, 71U, 20U, 108U, UI_BG);
+            if (hh) LCD_FillRect(6U, (uint16_t)(177U - hh), 18U, hh, UI_BAD);
+        }
+
+        /* شکل موج زنده (وسط پایین) */
+        {
+            float vtop = vm_pick_scale(vHi);
+            uint32_t start = 0U;
+            if (sig)
+            {
+                uint32_t mid = (mn + mx) / 2U;
+                for (uint32_t i = 1U; i < VM_TRIG_ZONE; i++)
+                    if (s_vmBuf[i - 1U] < mid && s_vmBuf[i] >= mid) { start = i; break; }
+            }
+            const uint16_t wx = (uint16_t)(LG_X0 + 2U), ww = (uint16_t)(LG_W - 4U);
+            const uint16_t wy = 124U, wh = 54U;
+            LCD_FillRect(wx, wy, ww, wh, UI_BG);
+            uint16_t prevY = 0xFFFFU;
+            for (uint16_t x = 0U; x < ww; x++)
+            {
+                uint32_t a = start + ((uint32_t)x * (VM_SHOW / 2U)) / ww;
+                uint32_t e = start + ((uint32_t)(x + 1U) * (VM_SHOW / 2U)) / ww;
+                if (e <= a) e = a + 1U;
+                if (e > VM_N) e = VM_N;
+                if (a >= VM_N) a = VM_N - 1U;
+                uint16_t lo = 65535U, hi = 0U;
+                for (uint32_t i = a; i < e; i++)
+                {
+                    if (s_vmBuf[i] < lo) lo = s_vmBuf[i];
+                    if (s_vmBuf[i] > hi) hi = s_vmBuf[i];
+                }
+                float fh = vm_counts_to_vin(hi) / vtop, fl = vm_counts_to_vin(lo) / vtop;
+                if (fh > 1.0f) fh = 1.0f;
+                if (fl > 1.0f) fl = 1.0f;
+                uint16_t yT = (uint16_t)(wy + wh - 2U - (uint16_t)(fh * (float)(wh - 4U)));
+                uint16_t yB = (uint16_t)(wy + wh - 2U - (uint16_t)(fl * (float)(wh - 4U)));
+                if (prevY != 0xFFFFU)
+                {
+                    if (prevY < yT) yT = prevY;
+                    if (prevY > yB) yB = prevY;
+                }
+                if (yB <= yT) yB = (uint16_t)(yT + 1U);
+                prevY = (uint16_t)(wy + wh - 2U - (uint16_t)(vm_counts_to_vin(s_vmBuf[e - 1U]) / vtop * (float)(wh - 4U)));
+                LCD_FillRect((uint16_t)(wx + x), yT, 1U, (uint16_t)(yB - yT + 1U), UI_TITLE);
+            }
+        }
+
+        /* ستون راست: L / A / H / Hz / D */
+        float hz = 0.0f, duty = 0.0f; uint8_t tooFast = 0U;
+        uint8_t fok = sig ? vm_analyze((uint16_t)mn, (uint16_t)mx, cyc, &hz, &duty, &tooFast) : 0U;
+        UI_FmtFixed(t, sizeof t, vLo, 1U); snprintf(b, sizeof b, "L%-4s", t);
+        UI_Text((uint16_t)(LG_RX + 3U), 74U, 2U, UI_CYAN, UI_BG, b);
+        UI_FmtFixed(t, sizeof t, vAv, 1U); snprintf(b, sizeof b, "A%-4s", t);
+        UI_Text((uint16_t)(LG_RX + 3U), 96U, 2U, UI_WHITE, UI_BG, b);
+        UI_FmtFixed(t, sizeof t, vHi, 1U); snprintf(b, sizeof b, "H%-4s", t);
+        UI_Text((uint16_t)(LG_RX + 3U), 118U, 2U, UI_ORANGE, UI_BG, b);
+        if (fok)
+        {
+            if (hz < 1000.0f) { UI_FmtFixed(t, sizeof t, hz, 0U); snprintf(b, sizeof b, "%sHz", t); }
+            else              { UI_FmtFixed(t, sizeof t, hz / 1000.0f, 1U); snprintf(b, sizeof b, "%sk", t); }
+        }
+        else snprintf(b, sizeof b, "--Hz");
+        { char c[10]; snprintf(c, sizeof c, "%-5s", b); UI_Text((uint16_t)(LG_RX + 3U), 140U, 2U, fok ? UI_CYAN : UI_DIM, UI_BG, c); }
+        if (fok) { UI_FmtFixed(t, sizeof t, duty, 0U); snprintf(b, sizeof b, "D%s%%", t); }
+        else     snprintf(b, sizeof b, "D--%%");
+        { char c[10]; snprintf(c, sizeof c, "%-5s", b); UI_Text((uint16_t)(LG_RX + 3U), 162U, 2U, fok ? UI_ORANGE : UI_DIM, UI_BG, c); }
+
+        /* چیپ‌های پایین */
+        for (uint8_t i = 0U; i < 3U; i++)
+        {
+            uint8_t on = (hold[i] != 0U) ? 1U : 0U;
+            if (on != shown[i])
+            {
+                shown[i] = on;
+                lg_chip(i, (i == 0U) ? "CAN-H" : (i == 1U) ? "CAN-L" : "K-LINE",
+                        (i == 0U) ? lvH : (i == 1U) ? lvL : lvK, on);
+            }
+        }
+    }
+    LEDs_AllOff();
+}
+
+/* ================================================================== */
 /*  Home pages -> functions                                            */
 /*   0 Dashboard  1 Tests  2 Logic analyzer  3 Voltmeter  4 Simulator  */
 /*   5 Scope  6 Ohmmeter  7 Buzzer  8 Wiring test  9 ECU flash                      */
@@ -1347,6 +1744,7 @@ void App_RunPage(uint8_t idx)
     switch (idx)
     {
     case 1: App_Tests();     break;
+    case 2: App_Logic();     break;
     case 3: App_Voltmeter(); break;
     case 4: App_SensorSim(); break;
     case 5: App_Scope();     break;

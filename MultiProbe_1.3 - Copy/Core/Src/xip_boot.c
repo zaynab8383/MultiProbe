@@ -93,6 +93,52 @@ BOOT_FN static int image_sync(const AES128_Ctx *ctx, const uint32_t nonce[2])
     return result;
 }
 
+/*
+ * Configure the external QSPI XIP window as normal, cacheable executable memory.
+ *
+ * The firmware is fetched repeatedly from 0x90000000.  An explicit MPU region
+ * lets the Cortex-M7 instruction cache retain hot code paths instead of treating
+ * every fetch as a slow external-memory transaction.
+ *
+ * Region 1 is used here; Region 0 remains available for the FMC/LCD protection
+ * configured later by LCD_MPU_Config().
+ */
+BOOT_FN static void xip_mpu_cache_enable(void)
+{
+    const uint32_t size_8mb = (22UL << MPU_RASR_SIZE_Pos); /* 2^(22+1) = 8 MB */
+
+    MPU->RNR  = 1U;
+    MPU->RBAR = QLL_MAP_BASE;
+    MPU->RASR = MPU_RASR_ENABLE_Msk              | size_8mb
+              | (3UL << MPU_RASR_AP_Pos)       /* full access */
+              | (1UL << MPU_RASR_C_Pos);       /* normal, cacheable, non-bufferable */
+              /* XN=0: instruction fetches are allowed */
+              ;
+
+    /* Keep the normal privileged background map enabled for the rest of the MCU. */
+    MPU->CTRL = MPU_CTRL_ENABLE_Msk | MPU_CTRL_PRIVDEFENA_Msk;
+    __DSB();
+    __ISB();
+}
+
+BOOT_FN static void xip_cache_enable(void)
+{
+    /* Remove any stale lines before the external encrypted image starts executing. */
+    SCB_InvalidateICache();
+    __DSB();
+    __ISB();
+
+#if defined(SCB_CCR_BP_Msk)
+    SCB->CCR |= SCB_CCR_BP_Msk;                /* branch prediction helps tight UI/graphics paths */
+    __DSB();
+    __ISB();
+#endif
+
+    SCB_EnableICache();
+    __DSB();
+    __ISB();
+}
+
 #if OTF_ENABLE
 BOOT_FN static void otf_enable(const uint8_t key[16], const uint32_t nonce[2], uint32_t image_bytes)
 {
@@ -154,5 +200,10 @@ BOOT_FN void Boot_ExternalInit(void)
     (void)size; (void)key;
 #endif
 
-    SCB_EnableICache();
+    /*
+     * OTFDEC is configured before enabling the cache, so only decrypted
+     * instructions/data are ever cached by the Cortex-M7.
+     */
+    xip_mpu_cache_enable();
+    xip_cache_enable();
 }

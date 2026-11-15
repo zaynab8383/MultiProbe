@@ -70,7 +70,7 @@ typedef struct {
 /* ۴) خوندن PWM: کدوم پایه‌ی ADC سیگنال پروب رو می‌بینه                 */
 /*    ⚠ فقط PB1 قطعاً Probe1 است؛ بقیه رو با دکمه‌ی چپ/راست امتحان کن.   */
 /* ------------------------------------------------------------------ */
-typedef enum { RD_PB1 = 0, RD_PA6, RD_PA2, RD_PC1, RD_COUNT } ReadSrc_t;
+typedef enum { RD_PB1 = 0, RD_PA6, RD_PA2, RD_PC1, RD_PC4, RD_COUNT } ReadSrc_t;
 #define RD_DEFAULT_FOR_PROBE1   RD_PB1
 #define RD_DEFAULT_FOR_PROBE2   RD_PA6
 

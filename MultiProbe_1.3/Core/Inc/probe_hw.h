@@ -40,6 +40,9 @@ uint8_t Probe_SwActiveHigh(void);             /* 1 = سوئیچ‌ها با HIGH
 void  Probe_DacSwitch(uint8_t ch, uint8_t on);   /* ch = 1 یا 2 */
 void  Probe_DacSet(uint8_t ch, float volts);     /* ولتاژ پایه‌ی DAC (۰..VDDA) */
 void  Probe_DacOff(void);
+/* تولید موج سینوسی روی DAC2/Probe2؛ دامنه و آفست بر حسب ولت */
+uint8_t Probe_DacSineStart(uint32_t frequency_hz, float amplitude_v, float offset_v);
+void    Probe_DacSineStop(void);
 
 /* تست دستی پایه‌ها */
 void  Probe_RawWrite(GPIO_TypeDef *port, uint16_t pin, uint8_t high);
