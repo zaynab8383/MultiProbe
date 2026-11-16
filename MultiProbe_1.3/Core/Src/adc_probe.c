@@ -109,6 +109,58 @@ float Adc_GetVin(void)
     return Adc_PinToVin(Adc_GetPC4());
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * نمونه‌برداری سریع با زمان‌بندی «قطعی» (deterministic)
+ *
+ * چرا؟ کل کد برنامه از فلش خارجی (XIP + OTFDEC) اجرا می‌شه و فقط I-cache داره. هر cache-miss و هر
+ * وقفه (SysTick / USB / ...) چند ده میکروثانیه فاصله‌ی بین نمونه‌ها رو می‌پرونه. قبلاً هم هر نمونه
+ * HAL_ADC_Start / Poll / Stop می‌شد (روشن/خاموش‌کردن ADC برای هر نمونه). نتیجه: فاصله‌ی نمونه‌ها
+ * یکنواخت نبود ولی نمایش فرض می‌کرد یکنواخته -> پالس مربعی با عرض‌های نامنظم و لرزان روی صفحه.
+ *
+ * حالا:
+ *   - حلقه‌ی نمونه‌برداری داخل RAM داخلی (.RamFunc) اجرا می‌شه، نه فلش خارجی
+ *   - ADC فقط یک‌بار روشن می‌شه؛ هر نمونه با رجیستر مستقیم شروع می‌شه
+ *   - شروع هر نمونه روی یک شبکه‌ی ثابت DWT->CYCCNT قفل است (t0 + k*step) نه «بعد از نمونه‌ی قبل»
+ *   - اگه کل بازه کوتاه (<= ~10ms) باشه وقفه‌ها حین نمونه‌برداری مسدود می‌شن
+ * ------------------------------------------------------------------------------------------------ */
+#define CAP_IRQ_MASK_MAX_MS  20U       /* بیشتر از این وقفه‌ها رو مسدود نمی‌کنیم (SysTick/USB) */
+
+__attribute__((section(".RamFunc"), noinline, optimize("O2")))
+static uint32_t adc_burst_ram(ADC_TypeDef *a, uint16_t *dst, uint32_t n, uint32_t step, uint32_t mask_irq)
+{
+    uint32_t primask = __get_PRIMASK();
+    if (mask_irq) __disable_irq();
+
+    /* اولین تبدیل رو HAL_ADC_Start شروع کرده؛ فقط تموم شدنش رو صبر می‌کنیم و دورش می‌ندازیم */
+    uint32_t t = DWT->CYCCNT;
+    while ((a->ISR & ADC_ISR_EOC) == 0U)
+    {
+        if ((DWT->CYCCNT - t) > 280000U) { if (mask_irq && !primask) __enable_irq(); return 0U; }
+    }
+    (void)a->DR;
+
+    uint32_t tgt = DWT->CYCCNT + 400U;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        while ((int32_t)(DWT->CYCCNT - tgt) < 0) { }
+        uint32_t ts = DWT->CYCCNT;
+        MODIFY_REG(a->CR, ADC_CR_BITS_PROPERTY_RS, ADC_CR_ADSTART);
+        while ((a->ISR & ADC_ISR_EOC) == 0U)
+        {
+            if ((DWT->CYCCNT - ts) > 280000U) { if (mask_irq && !primask) __enable_irq(); return 0U; }
+        }
+        dst[i] = (uint16_t)a->DR;                   /* خوندن DR پرچم EOC رو پاک می‌کنه */
+        if (i == 0U)
+        {
+            uint32_t conv = DWT->CYCCNT - ts;       /* زمان واقعی یک تبدیل */
+            if (step < conv + 40U) step = conv + 40U;
+        }
+        tgt += step;
+    }
+    if (mask_irq && !primask) __enable_irq();
+    return step;                                    /* گام واقعی (سیکل CPU) */
+}
+
 uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
 {
     ADC_ChannelConfTypeDef cfg = {0};
@@ -122,24 +174,16 @@ uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
 
-    uint32_t t0 = DWT->CYCCNT;
-    for (uint32_t i = 0U; i < n; i++)
-    {
-        HAL_ADC_Start(&hadc1);
-        if (HAL_ADC_PollForConversion(&hadc1, 2U) == HAL_OK)
-            dst[i] = (uint16_t)HAL_ADC_GetValue(&hadc1);
-        else
-            dst[i] = (i > 0U) ? dst[i - 1U] : 0U;
+    /* گام = حداقل گام + فاصله‌ی اضافه‌ی درخواستی (gap) ؛ همه‌ی صفحات (ولت‌متر، اسکوپ، لاجیک،
+     * تست سیم‌کشی) همون معنی قبلی gap رو دارن. */
+    uint32_t step = ADC_CAP_MIN_STEP_CYC + gap_cycles;
+    uint32_t mask = ((uint64_t)step * n <= (uint64_t)(SystemCoreClock / 1000U) * CAP_IRQ_MASK_MAX_MS) ? 1U : 0U;
 
-        if (gap_cycles != 0U)
-        {
-            uint32_t t = DWT->CYCCNT;
-            while ((DWT->CYCCNT - t) < gap_cycles) { }
-        }
-    }
-    uint32_t cyc = DWT->CYCCNT - t0;
-    HAL_ADC_Stop(&hadc1);
-    return cyc;
+    if (HAL_ADC_Start(&hadc1) != HAL_OK) return 0U;
+    uint32_t stepEff = adc_burst_ram(ADC1, dst, n, step, mask);
+    (void)HAL_ADC_Stop(&hadc1);
+    if (stepEff == 0U) return 0U;
+    return stepEff * n;                              /* کل سیکل‌ها: dt = برگشتی / n دقیقاً یکنواخته */
 }
 
 float Adc_GetPB1(void) { return (to_volt(read_raw(&hadc1, ADC_CHANNEL_5,  ADC_SAMPLETIME_64CYCLES_5)) - BIAS_PB1) * RATIO_PB1; }

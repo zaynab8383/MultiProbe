@@ -813,20 +813,217 @@ static void App_LedTest(void)
 /* ================================================================== */
 /*  Oscilloscope (با فیلتر نویز)                                       */
 /* ================================================================== */
+//#define SCOPE_N      4096U
+//#define SCOPE_Y0     52U
+//#define SCOPE_H      150U
+//#define SCOPE_GRID   0x2104U
+//#define SCOPE_FILT_W 6                      /* نیم‌پنجره‌ی فیلتر: ±6 نمونه */
+//static uint16_t s_scopeBuf[SCOPE_N];
+//static uint16_t s_scopeFilt[SCOPE_N];
+//
+//static uint32_t sc_abs_diff(uint32_t a, uint32_t b) { return (a > b) ? (a - b) : (b - a); }
+//
+///* میزان نویز: میانگین اختلاف نمونه‌های پشت‌سرهم (لبه‌های بزرگ حساب نمی‌شن) */
+//static uint32_t sc_noise_level(const uint16_t *b, uint32_t n, uint32_t span)
+//{
+//    uint32_t lim = span / 3U + 8U, cnt = 0U;
+//    uint64_t sum = 0U;
+//    for (uint32_t i = 1U; i < n; i++)
+//    {
+//        uint32_t d = sc_abs_diff(b[i], b[i - 1U]);
+//        if (d <= lim) { sum += d; cnt++; }
+//    }
+//    return (cnt != 0U) ? (uint32_t)(sum / cnt) : 0U;
+//}
+//
+///* median ۵ تایی: مرجع بدون نویز که لبه‌ها رو نگه می‌داره */
+//static uint32_t sc_med5(const uint16_t *b, uint32_t i, uint32_t n)
+//{
+//    uint32_t v[5];
+//    for (int k = 0; k < 5; k++)
+//    {
+//        int32_t j = (int32_t)i + k - 2;
+//        if (j < 0) j = 0;
+//        if (j >= (int32_t)n) j = (int32_t)n - 1;
+//        v[k] = b[j];
+//    }
+//    for (int x = 1; x < 5; x++)                     /* مرتب‌سازی درجی */
+//    {
+//        uint32_t t = v[x]; int y = x - 1;
+//        while (y >= 0 && v[y] > t) { v[y + 1] = v[y]; y--; }
+//        v[y + 1] = t;
+//    }
+//    return v[2];
+//}
+//
+///* فیلتر حفظ‌کننده‌ی لبه:
+// *   ref = median-5 اطراف نمونه (حذف spike، لبه‌ها سالم می‌مونن)
+// *   خروجی = میانگین همسایه‌های ±W که از ref بیشتر از T دور نیستن
+// *   -> نویز روی سطح‌ها و شیب‌ها میانگین‌گیری می‌شه، لبه‌ی پالس گرد نمی‌شه،
+// *      نمونه‌ی پرت (spike) به‌طور خودکار کنار گذاشته می‌شه. */
+//static void sc_filter(const uint16_t *in, uint16_t *out, uint32_t n, uint32_t span)
+//{
+//    uint32_t nd = sc_noise_level(in, n, span);
+//    uint32_t T  = 4U * nd + 16U;
+//    if (T < span / 16U) T = span / 16U;                       /* شیب‌های نرم (سینوس) هم میانگین‌گیری بشن */
+//    uint32_t Tmax = (span / 3U > 16U) ? span / 3U : 16U;     /* لبه‌ها رو نخوره */
+//    if (T > Tmax) T = Tmax;
+//
+//    for (uint32_t i = 0U; i < n; i++)
+//    {
+//        uint32_t ref = sc_med5(in, i, n);
+//        uint32_t sum = 0U, cnt = 0U;
+//        uint32_t j0 = (i >= (uint32_t)SCOPE_FILT_W) ? i - (uint32_t)SCOPE_FILT_W : 0U;
+//        uint32_t j1 = i + (uint32_t)SCOPE_FILT_W;
+//        if (j1 >= n) j1 = n - 1U;
+//        for (uint32_t j = j0; j <= j1; j++)
+//        {
+//            uint32_t v = in[j];
+//            if (sc_abs_diff(v, ref) <= T) { sum += v; cnt++; }
+//        }
+//        out[i] = (cnt != 0U) ? (uint16_t)(sum / cnt) : (uint16_t)ref;
+//    }
+//}
+//
+///* پس‌زمینه‌ی [ya, yb) از ستون x با خط‌چین شبکه (بدون پاک‌کردن کل صفحه = بدون پرش) */
+//static void sc_col_bg(uint16_t x, uint16_t ya, uint16_t yb)
+//{
+//    for (uint16_t g = 1U; g < 4U; g++)
+//    {
+//        uint16_t gy = (uint16_t)(SCOPE_Y0 + (SCOPE_H * g) / 4U);
+//        if (gy >= ya && gy < yb)
+//        {
+//            if (gy > ya) LCD_FillRect(x, ya, 1U, (uint16_t)(gy - ya), 0x0000U);
+//            LCD_FillRect(x, gy, 1U, 1U, SCOPE_GRID);
+//            ya = (uint16_t)(gy + 1U);
+//        }
+//    }
+//    if (ya < yb) LCD_FillRect(x, ya, 1U, (uint16_t)(yb - ya), 0x0000U);
+//}
+//
+//__attribute__((unused)) static void App_ScopeOld(void)
+//{
+//    LEDs_AllOff();
+//    UI_Begin("SCOPE - P2 SINE TEST");
+//    UI_Hint("U/D src L/R zoom OK filter");
+//
+//    /* Loopback test: keep DAC2 sine active while the scope samples Probe1.
+//       DAC2 output: 50 Hz, 0.50 V peak, 1.65 V offset. */
+//    uint8_t testSineRunning = Probe_DacSineStart(50U, 0.50f, 1.65f);
+//    UI_Row(0U, testSineRunning ? UI_OK : UI_ORANGE, UI_BG,
+//           testSineRunning ? "P2 SINE: 50Hz +/-0.50V" : "P2 SINE START FAILED");
+//
+//    LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
+//
+//    static const uint8_t zoom[] = { 1U, 2U, 4U, 8U, 16U };
+//    uint8_t zi = 1U;
+//    uint8_t filt = 1U;
+//    ReadSrc_t src = RD_PB1;   /* Probe1 (U7A) */
+//    uint32_t last = 0U - 1000U;
+//
+//    for (;;)
+//    {
+//        MenuInput_t in = UI_Poll();
+//        if (in == MENU_INPUT_BACK) break;
+//        if (in == MENU_INPUT_RIGHT) zi = (uint8_t)((zi + 1U) % sizeof(zoom));
+//        if (in == MENU_INPUT_LEFT)  zi = (uint8_t)((zi + sizeof(zoom) - 1U) % sizeof(zoom));
+//        if (in == MENU_INPUT_SELECT) filt = (uint8_t)!filt;
+//        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN) src = (src == RD_PB1) ? RD_PA6 : (src == RD_PA6) ? RD_PA2 : (src == RD_PA2) ? RD_PC1 : (src == RD_PC1) ? RD_PC4 : RD_PB1;
+//        if (!TICK_DUE(last, 120U)) continue;
+//        last = HAL_GetTick();
+//
+//        uint32_t cyc = Probe_Capture(src, s_scopeBuf, SCOPE_N);
+//        if (cyc == 0U) continue;
+//
+//        /* بازه‌ی خام برای تخمین نویز */
+//        uint32_t mn = 65535U, mx = 0U;
+//        for (uint32_t i = 0U; i < SCOPE_N; i++)
+//        {
+//            if (s_scopeBuf[i] < mn) mn = s_scopeBuf[i];
+//            if (s_scopeBuf[i] > mx) mx = s_scopeBuf[i];
+//        }
+//        const uint16_t *d = s_scopeBuf;
+//        if (filt)
+//        {
+//            sc_filter(s_scopeBuf, s_scopeFilt, SCOPE_N, mx - mn);
+//            d = s_scopeFilt;
+//            mn = 65535U; mx = 0U;                         /* min/max/ماشه از داده‌ی فیلترشده */
+//            for (uint32_t i = 0U; i < SCOPE_N; i++)
+//            {
+//                if (d[i] < mn) mn = d[i];
+//                if (d[i] > mx) mx = d[i];
+//            }
+//        }
+//
+//        /* ماشه: اولین لبه‌ی بالارونده‌ی وسط سطح، با هیسترزیس (۴۰٪ -> ۶۰٪) */
+//        uint32_t span = mx - mn, start = 0U;
+//        if (span > 2000U)
+//        {
+//            uint32_t lo = mn + (span * 4U) / 10U, hi = mn + (span * 6U) / 10U;
+//            uint8_t armed = 0U;
+//            for (uint32_t i = 0U; i < SCOPE_N / 2U; i++)
+//            {
+//                if (d[i] <= lo) armed = 1U;
+//                else if (armed && d[i] >= hi) { start = i; break; }
+//            }
+//        }
+//
+//        uint32_t top = (mx > 6000U) ? mx + mx / 8U : 6000U;   /* مقیاس عمودی: 0 .. top */
+//        const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
+//        uint16_t prevY = 0xFFFFU;
+//
+//        for (uint16_t x = 0U; x < LCD_WIDTH; x++)
+//        {
+//            uint32_t idx = start + (uint32_t)x * zoom[zi];
+//            if (idx >= SCOPE_N)                           /* داده تموم شد: فقط پس‌زمینه */
+//            {
+//                sc_col_bg(x, yMin, (uint16_t)(yMax + 1U));
+//                continue;
+//            }
+//            /* هر پیکسل = میانگین zoom نمونه (نویز کمتر، بدون aliasing) */
+//            uint32_t sum = 0U, cnt = 0U;
+//            for (uint32_t k = idx; k < idx + zoom[zi] && k < SCOPE_N; k++) { sum += d[k]; cnt++; }
+//            uint32_t v = sum / cnt;
+//            uint16_t y = (uint16_t)(yMax - (v * (SCOPE_H - 1U)) / top);
+//            if (y < yMin) y = yMin;
+//
+//            uint16_t y0 = (prevY == 0xFFFFU) ? y : ((y < prevY) ? y : prevY);
+//            uint16_t y1 = (prevY == 0xFFFFU) ? y : ((y < prevY) ? prevY : y);
+//            if (y1 <= y0) { if (y1 < yMax) y1++; else y0--; }      /* ضخامت حداقل ۲ پیکسل */
+//            prevY = y;
+//
+//            sc_col_bg(x, yMin, y0);
+//            LCD_FillRect(x, y0, 1U, (uint16_t)(y1 - y0 + 1U), UI_OK);
+//            sc_col_bg(x, (uint16_t)(y1 + 1U), (uint16_t)(yMax + 1U));
+//        }
+//
+//        char b[40], t1[12], t2[12];
+//        float dt_us = ((float)cyc / (float)SystemCoreClock) * 1.0e6f / (float)SCOPE_N;
+//        float win_ms = dt_us * (float)zoom[zi] * (float)LCD_WIDTH / 1000.0f;
+//        UI_FmtFixed(t1, sizeof t1, Probe_CountsToVolts(src, mx), 2);
+//        UI_FmtFixed(t2, sizeof t2, win_ms, 2);
+//        snprintf(b, sizeof b, "%s Vmax %s %sms F:%s", Probe_ReadName(src), t1, t2, filt ? "ON" : "OFF");
+//        UI_Text(2U, 204U, 1U, UI_DIM, UI_BG, b);
+//        LED_Blue_Set(span > 2000U);
+//    }
+//    /* Stop the generator only when leaving the scope page. */
+//    Probe_DacOff();
+//    LEDs_AllOff();
+//}
 #define SCOPE_N      4096U
 #define SCOPE_Y0     52U
 #define SCOPE_H      150U
 #define SCOPE_GRID   0x2104U
-#define SCOPE_FILT_W 6                      /* نیم‌پنجره‌ی فیلتر: ±6 نمونه */
+#define SCOPE_FILT_W 2                      /* کاهش پنجره فیلتر برای جلوگیری از گرد شدن لبه‌های مربعی */
 static uint16_t s_scopeBuf[SCOPE_N];
 static uint16_t s_scopeFilt[SCOPE_N];
 
 static uint32_t sc_abs_diff(uint32_t a, uint32_t b) { return (a > b) ? (a - b) : (b - a); }
 
-/* میزان نویز: میانگین اختلاف نمونه‌های پشت‌سرهم (لبه‌های بزرگ حساب نمی‌شن) */
+/* تابع محاسبه نویز ساده‌شده */
 static uint32_t sc_noise_level(const uint16_t *b, uint32_t n, uint32_t span)
 {
-    uint32_t lim = span / 3U + 8U, cnt = 0U;
+    uint32_t lim = span / 4U + 4U, cnt = 0U;
     uint64_t sum = 0U;
     for (uint32_t i = 1U; i < n; i++)
     {
@@ -836,56 +1033,31 @@ static uint32_t sc_noise_level(const uint16_t *b, uint32_t n, uint32_t span)
     return (cnt != 0U) ? (uint32_t)(sum / cnt) : 0U;
 }
 
-/* median ۵ تایی: مرجع بدون نویز که لبه‌ها رو نگه می‌داره */
-static uint32_t sc_med5(const uint16_t *b, uint32_t i, uint32_t n)
-{
-    uint32_t v[5];
-    for (int k = 0; k < 5; k++)
-    {
-        int32_t j = (int32_t)i + k - 2;
-        if (j < 0) j = 0;
-        if (j >= (int32_t)n) j = (int32_t)n - 1;
-        v[k] = b[j];
-    }
-    for (int x = 1; x < 5; x++)                     /* مرتب‌سازی درجی */
-    {
-        uint32_t t = v[x]; int y = x - 1;
-        while (y >= 0 && v[y] > t) { v[y + 1] = v[y]; y--; }
-        v[y + 1] = t;
-    }
-    return v[2];
-}
-
-/* فیلتر حفظ‌کننده‌ی لبه:
- *   ref = median-5 اطراف نمونه (حذف spike، لبه‌ها سالم می‌مونن)
- *   خروجی = میانگین همسایه‌های ±W که از ref بیشتر از T دور نیستن
- *   -> نویز روی سطح‌ها و شیب‌ها میانگین‌گیری می‌شه، لبه‌ی پالس گرد نمی‌شه،
- *      نمونه‌ی پرت (spike) به‌طور خودکار کنار گذاشته می‌شه. */
+/* فیلتر سبک‌تر برای حفظ لبه‌های تیز موج مربعی */
 static void sc_filter(const uint16_t *in, uint16_t *out, uint32_t n, uint32_t span)
 {
     uint32_t nd = sc_noise_level(in, n, span);
-    uint32_t T  = 4U * nd + 16U;
-    if (T < span / 16U) T = span / 16U;                       /* شیب‌های نرم (سینوس) هم میانگین‌گیری بشن */
-    uint32_t Tmax = (span / 3U > 16U) ? span / 3U : 16U;     /* لبه‌ها رو نخوره */
-    if (T > Tmax) T = Tmax;
+    uint32_t T  = 2U * nd + 8U;
 
     for (uint32_t i = 0U; i < n; i++)
     {
-        uint32_t ref = sc_med5(in, i, n);
-        uint32_t sum = 0U, cnt = 0U;
+        uint32_t sum = (uint32_t)in[i];
+        uint32_t cnt = 1U;
         uint32_t j0 = (i >= (uint32_t)SCOPE_FILT_W) ? i - (uint32_t)SCOPE_FILT_W : 0U;
         uint32_t j1 = i + (uint32_t)SCOPE_FILT_W;
         if (j1 >= n) j1 = n - 1U;
+
         for (uint32_t j = j0; j <= j1; j++)
         {
+            if (j == i) continue;
             uint32_t v = in[j];
-            if (sc_abs_diff(v, ref) <= T) { sum += v; cnt++; }
+            if (sc_abs_diff(v, in[i]) <= T) { sum += v; cnt++; }
         }
-        out[i] = (cnt != 0U) ? (uint16_t)(sum / cnt) : (uint16_t)ref;
+        out[i] = (uint16_t)(sum / cnt);
     }
 }
 
-/* پس‌زمینه‌ی [ya, yb) از ستون x با خط‌چین شبکه (بدون پاک‌کردن کل صفحه = بدون پرش) */
+/* پس‌زمینه‌ی [ya, yb) از ستون x با خط‌چین شبکه */
 static void sc_col_bg(uint16_t x, uint16_t ya, uint16_t yb)
 {
     for (uint16_t g = 1U; g < 4U; g++)
@@ -900,25 +1072,22 @@ static void sc_col_bg(uint16_t x, uint16_t ya, uint16_t yb)
     }
     if (ya < yb) LCD_FillRect(x, ya, 1U, (uint16_t)(yb - ya), 0x0000U);
 }
-
 __attribute__((unused)) static void App_ScopeOld(void)
 {
     LEDs_AllOff();
-    UI_Begin("SCOPE - P2 SINE TEST");
+    UI_Begin("SCOPE - SQUARE WAVE STABLE");
     UI_Hint("U/D src L/R zoom OK filter");
 
-    /* Loopback test: keep DAC2 sine active while the scope samples Probe1.
-       DAC2 output: 50 Hz, 0.50 V peak, 1.65 V offset. */
     uint8_t testSineRunning = Probe_DacSineStart(50U, 0.50f, 1.65f);
     UI_Row(0U, testSineRunning ? UI_OK : UI_ORANGE, UI_BG,
-           testSineRunning ? "P2 SINE: 50Hz +/-0.50V" : "P2 SINE START FAILED");
+           testSineRunning ? "SCOPE: STABLE TRIGGER ACTIVE" : "DAC START FAILED");
 
     LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
 
     static const uint8_t zoom[] = { 1U, 2U, 4U, 8U, 16U };
     uint8_t zi = 1U;
-    uint8_t filt = 1U;
-    ReadSrc_t src = RD_PB1;   /* Probe1 (U7A) */
+    uint8_t filt = 0U;
+    ReadSrc_t src = RD_PB1;
     uint32_t last = 0U - 1000U;
 
     for (;;)
@@ -935,19 +1104,19 @@ __attribute__((unused)) static void App_ScopeOld(void)
         uint32_t cyc = Probe_Capture(src, s_scopeBuf, SCOPE_N);
         if (cyc == 0U) continue;
 
-        /* بازه‌ی خام برای تخمین نویز */
         uint32_t mn = 65535U, mx = 0U;
         for (uint32_t i = 0U; i < SCOPE_N; i++)
         {
             if (s_scopeBuf[i] < mn) mn = s_scopeBuf[i];
             if (s_scopeBuf[i] > mx) mx = s_scopeBuf[i];
         }
+
         const uint16_t *d = s_scopeBuf;
         if (filt)
         {
             sc_filter(s_scopeBuf, s_scopeFilt, SCOPE_N, mx - mn);
             d = s_scopeFilt;
-            mn = 65535U; mx = 0U;                         /* min/max/ماشه از داده‌ی فیلترشده */
+            mn = 65535U; mx = 0U;
             for (uint32_t i = 0U; i < SCOPE_N; i++)
             {
                 if (d[i] < mn) mn = d[i];
@@ -955,41 +1124,62 @@ __attribute__((unused)) static void App_ScopeOld(void)
             }
         }
 
-        /* ماشه: اولین لبه‌ی بالارونده‌ی وسط سطح، با هیسترزیس (۴۰٪ -> ۶۰٪) */
+        /* [اصلاح‌شده]: تریگر پایدار بر روی لبه‌ی بالارونده (Rising Edge) با هیسترزیس */
         uint32_t span = mx - mn, start = 0U;
-        if (span > 2000U)
+        if (span > 100U)
         {
-            uint32_t lo = mn + (span * 4U) / 10U, hi = mn + (span * 6U) / 10U;
-            uint8_t armed = 0U;
-            for (uint32_t i = 0U; i < SCOPE_N / 2U; i++)
+            uint32_t low_thresh  = mn + (span * 30U) / 100U;
+            uint32_t high_thresh = mn + (span * 70U) / 100U;
+            uint8_t state = 0; /* 0: منتظر سطح پایین، 1: لبه بالارونده کشف شد */
+
+            for (uint32_t i = 0U; i < SCOPE_N - 10U; i++)
             {
-                if (d[i] <= lo) armed = 1U;
-                else if (armed && d[i] >= hi) { start = i; break; }
+                if (state == 0 && d[i] < low_thresh) {
+                    state = 1;
+                } else if (state == 1 && d[i] >= high_thresh) {
+                    start = i; /* قفل شدن دقیق روی لبه‌ی پالس برای حذف لرزش (Jitter) */
+                    break;
+                }
             }
         }
 
-        uint32_t top = (mx > 6000U) ? mx + mx / 8U : 6000U;   /* مقیاس عمودی: 0 .. top */
+        /* مقیاس عمودی پویای دقیق */
+        uint32_t top = (mx > mn) ? (mx - mn) : 4096U;
+        if (top < 10U) top = 10U;
+
         const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
         uint16_t prevY = 0xFFFFU;
 
         for (uint16_t x = 0U; x < LCD_WIDTH; x++)
         {
             uint32_t idx = start + (uint32_t)x * zoom[zi];
-            if (idx >= SCOPE_N)                           /* داده تموم شد: فقط پس‌زمینه */
+            if (idx >= SCOPE_N)
             {
                 sc_col_bg(x, yMin, (uint16_t)(yMax + 1U));
                 continue;
             }
-            /* هر پیکسل = میانگین zoom نمونه (نویز کمتر، بدون aliasing) */
+
             uint32_t sum = 0U, cnt = 0U;
             for (uint32_t k = idx; k < idx + zoom[zi] && k < SCOPE_N; k++) { sum += d[k]; cnt++; }
-            uint32_t v = sum / cnt;
-            uint16_t y = (uint16_t)(yMax - (v * (SCOPE_H - 1U)) / top);
+            uint32_t v = (cnt != 0U) ? (sum / cnt) : mn;
+
+            if (v < mn) v = mn;
+            if (v > mx) v = mx;
+
+            /* [اصلاح‌شده]: حذف شیب‌های کاذب و تثبیت سطوح بالا و پایین پالس مربعی */
+            if (span > 100U) {
+                uint32_t mid = mn + span / 2U;
+                if (v > mid + (span / 10U)) v = mx;       /* فیکس کردن سطح بالا روی خط صاف */
+                else if (v < mid - (span / 10U)) v = mn;  /* فیکس کردن سطح پایین روی زمین */
+            }
+
+            uint16_t y = (uint16_t)(yMax - ((v - mn) * (SCOPE_H - 1U)) / top);
             if (y < yMin) y = yMin;
+            if (y > yMax) y = yMax;
 
             uint16_t y0 = (prevY == 0xFFFFU) ? y : ((y < prevY) ? y : prevY);
             uint16_t y1 = (prevY == 0xFFFFU) ? y : ((y < prevY) ? prevY : y);
-            if (y1 <= y0) { if (y1 < yMax) y1++; else y0--; }      /* ضخامت حداقل ۲ پیکسل */
+            if (y1 <= y0) { if (y1 < yMax) y1++; else y0--; }
             prevY = y;
 
             sc_col_bg(x, yMin, y0);
@@ -1004,21 +1194,283 @@ __attribute__((unused)) static void App_ScopeOld(void)
         UI_FmtFixed(t2, sizeof t2, win_ms, 2);
         snprintf(b, sizeof b, "%s Vmax %s %sms F:%s", Probe_ReadName(src), t1, t2, filt ? "ON" : "OFF");
         UI_Text(2U, 204U, 1U, UI_DIM, UI_BG, b);
-        LED_Blue_Set(span > 2000U);
+        LED_Blue_Set(span > 100U);
     }
-    /* Stop the generator only when leaving the scope page. */
     Probe_DacOff();
     LEDs_AllOff();
 }
+//__attribute__((unused)) static void App_ScopeOld(void)
+//{
+//    LEDs_AllOff();
+//    UI_Begin("SCOPE - P2 SINE TEST");
+//    UI_Hint("U/D src L/R zoom OK filter");
+//
+//    uint8_t testSineRunning = Probe_DacSineStart(50U, 0.50f, 1.65f);
+//    UI_Row(0U, testSineRunning ? UI_OK : UI_ORANGE, UI_BG,
+//           testSineRunning ? "P2 SINE: 50Hz +/-0.50V" : "P2 SINE START FAILED");
+//
+//    LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
+//
+//    static const uint8_t zoom[] = { 1U, 2U, 4U, 8U, 16U };
+//    uint8_t zi = 1U;
+//    uint8_t filt = 0U;         /* پیش‌فرض فیلتر خاموش برای جلوگیری از گرد شدن لبه‌ها */
+//    ReadSrc_t src = RD_PB1;
+//    uint32_t last = 0U - 1000U;
+//
+//    for (;;)
+//    {
+//        MenuInput_t in = UI_Poll();
+//        if (in == MENU_INPUT_BACK) break;
+//        if (in == MENU_INPUT_RIGHT) zi = (uint8_t)((zi + 1U) % sizeof(zoom));
+//        if (in == MENU_INPUT_LEFT)  zi = (uint8_t)((zi + sizeof(zoom) - 1U) % sizeof(zoom));
+//        if (in == MENU_INPUT_SELECT) filt = (uint8_t)!filt;
+//        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN) src = (src == RD_PB1) ? RD_PA6 : (src == RD_PA6) ? RD_PA2 : (src == RD_PA2) ? RD_PC1 : (src == RD_PC1) ? RD_PC4 : RD_PB1;
+//        if (!TICK_DUE(last, 120U)) continue;
+//        last = HAL_GetTick();
+//
+//        uint32_t cyc = Probe_Capture(src, s_scopeBuf, SCOPE_N);
+//        if (cyc == 0U) continue;
+//
+//        uint32_t mn = 65535U, mx = 0U;
+//        for (uint32_t i = 0U; i < SCOPE_N; i++)
+//        {
+//            if (s_scopeBuf[i] < mn) mn = s_scopeBuf[i];
+//            if (s_scopeBuf[i] > mx) mx = s_scopeBuf[i];
+//        }
+//
+//        const uint16_t *d = s_scopeBuf;
+//        if (filt)
+//        {
+//            sc_filter(s_scopeBuf, s_scopeFilt, SCOPE_N, mx - mn);
+//            d = s_scopeFilt;
+//            mn = 65535U; mx = 0U;
+//            for (uint32_t i = 0U; i < SCOPE_N; i++)
+//            {
+//                if (d[i] < mn) mn = d[i];
+//                if (d[i] > mx) mx = d[i];
+//            }
+//        }
+//
+//        /* محاسبه دقیق‌تر سطح ماشه (Trigger) برای پایداری موج مربعی */
+//        uint32_t span = mx - mn, start = 0U;
+//        if (span > 100U)
+//        {
+//            uint32_t threshold = mn + span / 2U;
+//            uint8_t armed = 0U;
+//            for (uint32_t i = 0U; i < SCOPE_N / 2U; i++)
+//            {
+//                if (d[i] < threshold) armed = 1U;
+//                else if (armed && d[i] >= threshold) { start = i; break; }
+//            }
+//        }
+//
+//        /* مقیاس عمودی پویای دقیق بر اساس مینیمم و ماکزیمم واقعی */
+//        uint32_t top = (mx > mn) ? (mx - mn) : 4096U;
+//        if (top < 10U) top = 10U;
+//
+//        const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
+//        uint16_t prevY = 0xFFFFU;
+//
+//        for (uint16_t x = 0U; x < LCD_WIDTH; x++)
+//        {
+//            uint32_t idx = start + (uint32_t)x * zoom[zi];
+//            if (idx >= SCOPE_N)
+//            {
+//                sc_col_bg(x, yMin, (uint16_t)(yMax + 1U));
+//                continue;
+//            }
+//
+//            uint32_t sum = 0U, cnt = 0U;
+//            for (uint32_t k = idx; k < idx + zoom[zi] && k < SCOPE_N; k++) { sum += d[k]; cnt++; }
+//            uint32_t v = (cnt != 0U) ? (sum / cnt) : mn;
+//
+//            if (v < mn) v = mn;
+//            if (v > mx) v = mx;
+//
+//            uint16_t y = (uint16_t)(yMax - ((v - mn) * (SCOPE_H - 1U)) / top);
+//            if (y < yMin) y = yMin;
+//            if (y > yMax) y = yMax;
+//
+//            uint16_t y0 = (prevY == 0xFFFFU) ? y : ((y < prevY) ? y : prevY);
+//            uint16_t y1 = (prevY == 0xFFFFU) ? y : ((y < prevY) ? prevY : y);
+//            if (y1 <= y0) { if (y1 < yMax) y1++; else y0--; }
+//            prevY = y;
+//
+//            sc_col_bg(x, yMin, y0);
+//            LCD_FillRect(x, y0, 1U, (uint16_t)(y1 - y0 + 1U), UI_OK);
+//            sc_col_bg(x, (uint16_t)(y1 + 1U), (uint16_t)(yMax + 1U));
+//        }
+//
+//        char b[40], t1[12], t2[12];
+//        float dt_us = ((float)cyc / (float)SystemCoreClock) * 1.0e6f / (float)SCOPE_N;
+//        float win_ms = dt_us * (float)zoom[zi] * (float)LCD_WIDTH / 1000.0f;
+//        UI_FmtFixed(t1, sizeof t1, Probe_CountsToVolts(src, mx), 2);
+//        UI_FmtFixed(t2, sizeof t2, win_ms, 2);
+//        snprintf(b, sizeof b, "%s Vmax %s %sms F:%s", Probe_ReadName(src), t1, t2, filt ? "ON" : "OFF");
+//        UI_Text(2U, 204U, 1U, UI_DIM, UI_BG, b);
+//        LED_Blue_Set(span > 100U);
+//    }
+//    Probe_DacOff();
+//    LEDs_AllOff();
 
 /* ---- اسکوپ: صفحه‌ی مستقل ، ولی با همون نمونه‌برداری PC4 ی که توی ولت‌متر درست کار می‌کنه ---- */
+/* ================================================================== */
+/*  اسکوپ: بازسازی موج دیجیتال (ضد افت / رمپ)                              */
+/*  روی برد، موج مربعی بعد از هر لبه‌ی بالا‌رونده کم‌کم افت می‌کرد (شبیه دندانه‌ی  */
+/*  اره). تشخیص «لبه» فقط به پرش ناگهانی ولتاژ نگاه می‌کنه، نه به سطح، پس       */
+/*  افت آهسته رو نادیده می‌گیره. بعد از پیدا کردن لبه‌ها یه موج مربعی تمیز با      */
+/*  دو سطح ثابت می‌سازیم و همونو رسم می‌کنیم. فرکانس و دیوتی هم از لبه‌ها حساب   */
+/*  می‌شه. برای موج‌های غیر دیجیتال (سینوس و DC) همون رسم خام قبلی می‌مونه.      */
+/* ================================================================== */
+/* پنجره‌ی ثبت اسکوپ ۳ برابر پنجره‌ی نمایش: ماشه توی بخش اضافه می‌گرده و اضافه‌ها دور ریخته می‌شن */
+#define SC_N          6144U            /* نمونه‌ی ثبت‌شده */
+#define SC_SHOW       2048U            /* نمونه‌ی نمایش‌داده‌شده (۱/۳) */
+#define SC_PERIODS    12.0f            /* AUTO: کل ثبت حدود ۱۲ پریود از سیگنال رو بگیره (۴ تاش نمایش داده می‌شه) */
+#define SC_AUTO_MAX_US 100U
+#define SC_NB         256U             /* تعداد بین‌های هم‌پوشانی پریود */
+static uint16_t s_scBuf[SC_N];
+static float s_scV[SC_N];      /* ولت خام */
+static float s_scR[SC_N];      /* موج بازسازی‌شده */
+
+#define SC_MAXE   512U
+#define SC_HYST   0.15f      /* هیسترزیس ±۱۵٪ دامنه دور سطح میانی */
+#define SC_MINW   3U         /* پالس کوتاه‌تر از این (نمونه) = گلیچ و حذف می‌شه */
+
+static float sc_med3(float a, float b, float c)
+{
+    if (a > b) { float t = a; a = b; b = t; }
+    if (b > c) { b = c; }
+    return (a > b) ? a : b;
+}
+
+/* v: ولت خام (n نمونه با فاصله‌ی یکنواخت dt) ؛ out: موج دیجیتال تمیز.
+ * برمی‌گردونه 0 اگه سیگنال دیجیتال/پریودیک نیست (سینوس، DC، نویز). */
+static float s_scPos[SC_MAXE]; static int8_t s_scDir[SC_MAXE]; static uint32_t s_scNe;
+
+static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
+                          float *hz, float *duty, float *lo, float *hi, uint32_t *first, float *r0out)
+{
+    /* ۱) حذف spike تک‌نمونه‌ای (median-3) -> out موقتاً نگه‌دارنده‌ی نسخه‌ی تمیز است */
+    out[0] = v[0]; out[n - 1U] = v[n - 1U];
+    for (uint32_t i = 1U; i + 1U < n; i++) out[i] = sc_med3(v[i - 1U], v[i], v[i + 1U]);
+
+    float mn = out[0], mx = out[0];
+    for (uint32_t i = 1U; i < n; i++) { if (out[i] < mn) mn = out[i]; if (out[i] > mx) mx = out[i]; }
+    float span = mx - mn;
+    if (span < 0.8f) return 0U;
+    float mid = 0.5f * (mx + mn);
+    float thH = mid + SC_HYST * span, thL = mid - SC_HYST * span;
+
+    /* ۲) Schmitt trigger روی سطح (نه روی شیب) ؛ لبه = عبور از mid با درون‌یابی */
+    float *pos = s_scPos; int8_t *dir = s_scDir; uint32_t ne = 0U;
+    uint8_t st = (out[0] > mid) ? 1U : 0U;
+    for (uint32_t i = 1U; i < n && ne < SC_MAXE; i++)
+    {
+        float x = out[i];
+        if (!st && x > thH)
+        {
+            uint32_t j = i; uint32_t lim = (i > 24U) ? i - 24U : 0U;
+            while (j > lim && out[j - 1U] > mid) j--;           /* اولین نمونه‌ی بالای mid */
+            float a = (j > 0U) ? out[j - 1U] : out[j], b = out[j];
+            float f = (b > a) ? (mid - a) / (b - a) : 0.0f;
+            pos[ne] = (j > 0U) ? ((float)(j - 1U) + f) : (float)j; dir[ne] = 1; ne++; st = 1U;
+        }
+        else if (st && x < thL)
+        {
+            uint32_t j = i; uint32_t lim = (i > 24U) ? i - 24U : 0U;
+            while (j > lim && out[j - 1U] < mid) j--;
+            float a = (j > 0U) ? out[j - 1U] : out[j], b = out[j];
+            float f = (a > b) ? (a - mid) / (a - b) : 0.0f;
+            pos[ne] = (j > 0U) ? ((float)(j - 1U) + f) : (float)j; dir[ne] = -1; ne++; st = 0U;
+        }
+    }
+
+    /* ۳) حذف پالس‌های خیلی کوتاه (جفت لبه‌ی متوالی نزدیک هم) */
+    for (uint32_t k = 0U; k + 1U < ne; )
+    {
+        if ((pos[k + 1U] - pos[k]) < (float)SC_MINW)
+        {
+            for (uint32_t m = k; m + 2U < ne; m++) { pos[m] = pos[m + 2U]; dir[m] = dir[m + 2U]; }
+            ne -= 2U;
+            if (k > 0U) k--;
+        }
+        else k++;
+    }
+    if (ne < 4U) return 0U;
+    s_scNe = ne;
+
+    /* ۴) سطح پایین/بالا: میانگین نمونه‌های «داخل» هر پالس (دور از لبه‌ها، بدون overshoot) */
+    float lsum = 0.0f, hsum = 0.0f; uint32_t lc = 0U, hc2 = 0U;
+    for (uint32_t k = 0U; k + 1U < ne; k++)
+    {
+        uint32_t a = (uint32_t)pos[k] + 4U, b = (uint32_t)pos[k + 1U];
+        if (b < 4U || b <= a + 1U) continue;
+        b -= 4U; if (b <= a) continue;
+        float s = 0.0f; for (uint32_t q = a; q < b && q < n; q++) s += out[q];
+        uint32_t c = (b < n ? b : n) - a;
+        if (dir[k] > 0) { hsum += s; hc2 += c; } else { lsum += s; lc += c; }
+    }
+    float L = mn, H = mx;
+    if (lc > 0U && hc2 > 0U)
+    {
+        float l2 = lsum / (float)lc, h2 = hsum / (float)hc2;
+        if (h2 > l2 + 0.5f * span) { L = l2; H = h2; }
+    }
+
+    /* ۵) موج تمیز */
+    uint8_t s0 = (dir[0] > 0) ? 0U : 1U;
+    uint32_t k = 0U;
+    for (uint32_t q = 0U; q < n; q++)
+    {
+        while (k < ne && (float)q >= pos[k]) { s0 = (dir[k] > 0) ? 1U : 0U; k++; }
+        out[q] = s0 ? H : L;
+    }
+
+    /* ۶) فرکانس و دیوتی از لبه‌های بالارونده */
+    float r0 = -1.0f, rl = 0.0f, highT = 0.0f; uint32_t rc = 0U, hn = 0U;
+    for (uint32_t m = 0U; m < ne; m++)
+    {
+        if (dir[m] > 0)
+        {
+            if (rc == 0U) r0 = pos[m];
+            rl = pos[m]; rc++;
+            if (m + 1U < ne && dir[m + 1U] < 0) { highT += pos[m + 1U] - pos[m]; hn++; }
+        }
+    }
+    *hz = 0.0f; *duty = 0.0f; *r0out = r0;
+    if (rc >= 2U)
+    {
+        float per = (rl - r0) / (float)(rc - 1U);
+        if (per > 1.0f && dt > 0.0f)
+        {
+            *hz = 1.0f / (per * dt);
+            if (hn > 0U) { *duty = 100.0f * (highT / (float)hn) / per; if (*duty > 100.0f) *duty = 100.0f; }
+        }
+    }
+    *lo = L; *hi = H;
+    *first = 0U;
+    for (uint32_t m = 0U; m < ne; m++) if (dir[m] > 0 && pos[m] < (float)VM_TRIG_ZONE) { *first = (uint32_t)(pos[m] + 0.5f); break; }
+    return 1U;
+}
+
+static uint16_t s_scTop[LCD_WIDTH], s_scBot[LCD_WIDTH];
+static uint16_t s_scCntH[SC_NB], s_scCntT[SC_NB];
+static uint8_t  s_scBin[SC_NB];
+
+/* فاز کسری 0..1 بدون libm */
+static float sc_frac(float x)
+{
+    float f = x - (float)(int32_t)x;
+    return (f < 0.0f) ? f + 1.0f : f;
+}
+
 static void App_Scope(void)
 {
     LEDs_AllOff();
     UI_Begin("SCOPE");
     UI_Hint("L/R zoom U/D rate OK hold");
-    uint8_t sineOn = Probe_DacSineStart(50U, 0.50f, 1.65f);   /* سینوس DAC2 روی Probe2 */
     LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
+    for (uint16_t x = 0U; x < LCD_WIDTH; x++) { s_scTop[x] = 0xFFFFU; s_scBot[x] = 0xFFFFU; }
 
     static const uint16_t k_tbUs[] = { 0U, 2U, 5U, 10U, 20U, 50U, 100U, 200U };
     static const uint8_t  k_zm[]   = { 1U, 2U, 4U, 8U, 16U };
@@ -1040,28 +1492,243 @@ static void App_Scope(void)
 
         uint32_t gapUs = (tb == 0U) ? autoGapUs : (uint32_t)k_tbUs[tb];
         uint32_t gap   = (SystemCoreClock / 1000000U) * gapUs;
-        uint32_t cyc   = Adc_CapturePC4(s_vmBuf, VM_N, gap);
+        uint32_t cyc   = Adc_CapturePC4(s_scBuf, SC_N, gap);
         if (cyc == 0U) continue;
 
         uint32_t mn = 65535U, mx = 0U;
-        for (uint32_t i = 0U; i < VM_N; i++)
+        for (uint32_t i = 0U; i < SC_N; i++)
         {
-            if (s_vmBuf[i] < mn) mn = s_vmBuf[i];
-            if (s_vmBuf[i] > mx) mx = s_vmBuf[i];
+            if (s_scBuf[i] < mn) mn = s_scBuf[i];
+            if (s_scBuf[i] > mx) mx = s_scBuf[i];
+            s_scV[i] = vm_counts_to_vin(s_scBuf[i]);
         }
         float vLo = vm_counts_to_vin(mn), vHi = vm_counts_to_vin(mx);
+        const float dt = ((float)cyc / (float)SystemCoreClock) / (float)SC_N;
+
+        float hzD = 0.0f, dutyD = 0.0f, loD = 0.0f, hiD = 0.0f, r0 = 0.0f; uint32_t firstD = 0U;
+        s_scNe = 0U;
+        uint8_t dig = sc_digital(s_scV, SC_N, dt, s_scR, &hzD, &dutyD, &loD, &hiD, &firstD, &r0);
+        if (dig) { vLo = loD; vHi = hiD; }
         uint8_t sig = ((vHi - vLo) > VM_SIG_SPAN_V) ? 1U : 0U;
 
+        /* ---- بازسازی قفل‌شده روی ماشه (مثل DSO): پریود و عرض پالس = «میانه»ی همه‌ی لبه‌های ثبت‌شده.
+         *      گلیچ و لرزش تک‌لبه اثری ندارن و هر فریم دقیقاً همون موج رو می‌کشه. ---- */
+//        uint8_t  fold = 0U;
+//        float    dutyF = dutyD, jit = 0.0f;
+//        const float *dv = dig ? s_scR : s_scV;
+//        uint32_t start = 0U;
+//        if (dig && sig && hzD > 0.0f)
+//        {
+//            static float per[SC_MAXE / 2U], wid[SC_MAXE / 2U];
+//            uint32_t np = 0U, nw = 0U; float lastR = -1.0f;
+//            for (uint32_t m = 0U; m < s_scNe; m++)
+//            {
+//                if (s_scDir[m] > 0)
+//                {
+//                    if (lastR >= 0.0f && np < SC_MAXE / 2U) per[np++] = s_scPos[m] - lastR;
+//                    lastR = s_scPos[m];
+//                    if (m + 1U < s_scNe && s_scDir[m + 1U] < 0 && nw < SC_MAXE / 2U) wid[nw++] = s_scPos[m + 1U] - s_scPos[m];
+//                }
+//            }
+//            if (np >= 2U && nw >= 2U)
+//            {
+//                for (uint32_t i = 1U; i < np; i++) { float k = per[i]; uint32_t j = i; while (j > 0U && per[j - 1U] > k) { per[j] = per[j - 1U]; j--; } per[j] = k; }
+//                for (uint32_t i = 1U; i < nw; i++) { float k = wid[i]; uint32_t j = i; while (j > 0U && wid[j - 1U] > k) { wid[j] = wid[j - 1U]; j--; } wid[j] = k; }
+//                float P = per[np / 2U], W = wid[nw / 2U];
+//                jit = (per[np - 1U - np / 8U] - per[np / 8U]) / P;                 /* پخش پریودها (۱۰–۹۰٪) */
+//                if (P >= 8.0f && W > 1.0f && W < P && jit < 0.35f)
+//                {
+//                    fold = 1U;
+//                    dutyF = 100.0f * W / P;
+//                    hzD   = 1.0f / (P * dt);
+//                    const float invP = 1.0f / P, dth = W * invP;
+//                    for (uint32_t j = 0U; j < SC_SHOW; j++)
+//                        s_scR[j] = (sc_frac((float)j * invP - 0.04f) < dth + 0.0f && sc_frac((float)j * invP - 0.04f) >= 0.0f) ? hiD : loD;
+//                    dv = s_scR;
+//                    start = 0U;
+//                }
+//            }
+//        }
+
+        /* ---- LOCK پایدار با هیسترزیس ---- */
+        static uint8_t lockState = 0U;
+        static uint8_t goodFrames = 0U;
+        static uint8_t badFrames = 0U;
+
+        static float lockP = 0.0f;
+        static float lockW = 0.0f;
+        static float lockHi = 0.0f;
+        static float lockLo = 0.0f;
+
+        uint8_t fold = 0U;
+        float dutyF = dutyD;
+        float jit = 0.0f;
+        const float *dv = dig ? s_scR : s_scV;
         uint32_t start = 0U;
-        if (sig)
+
+        uint8_t candidate = 0U;
+        float candidateP = 0.0f;
+        float candidateW = 0.0f;
+
+        if (dig && sig && hzD > 0.0f)
         {
-            uint32_t mid = (mn + mx) / 2U;
-            for (uint32_t i = 1U; i < VM_TRIG_ZONE; i++)
-                if (s_vmBuf[i - 1U] < mid && s_vmBuf[i] >= mid) { start = i; break; }
+            static float per[SC_MAXE / 2U];
+            static float wid[SC_MAXE / 2U];
+
+            uint32_t np = 0U;
+            uint32_t nw = 0U;
+            float lastR = -1.0f;
+
+            for (uint32_t m = 0U; m < s_scNe; m++)
+            {
+                if (s_scDir[m] > 0)
+                {
+                    if (lastR >= 0.0f && np < SC_MAXE / 2U)
+                        per[np++] = s_scPos[m] - lastR;
+
+                    lastR = s_scPos[m];
+
+                    if (m + 1U < s_scNe &&
+                        s_scDir[m + 1U] < 0 &&
+                        nw < SC_MAXE / 2U)
+                    {
+                        wid[nw++] = s_scPos[m + 1U] - s_scPos[m];
+                    }
+                }
+            }
+
+            if (np >= 2U && nw >= 2U)
+            {
+                for (uint32_t i = 1U; i < np; i++)
+                {
+                    float k = per[i];
+                    uint32_t j = i;
+
+                    while (j > 0U && per[j - 1U] > k)
+                    {
+                        per[j] = per[j - 1U];
+                        j--;
+                    }
+                    per[j] = k;
+                }
+
+                for (uint32_t i = 1U; i < nw; i++)
+                {
+                    float k = wid[i];
+                    uint32_t j = i;
+
+                    while (j > 0U && wid[j - 1U] > k)
+                    {
+                        wid[j] = wid[j - 1U];
+                        j--;
+                    }
+                    wid[j] = k;
+                }
+
+                float P = per[np / 2U];
+                float W = wid[nw / 2U];
+
+                if (P > 0.0f)
+                    jit = (per[np - 1U - np / 8U] -
+                           per[np / 8U]) / P;
+
+                if (P >= 8.0f &&
+                    W > 1.0f &&
+                    W < P &&
+                    jit < 0.35f)
+                {
+                    candidate = 1U;
+                    candidateP = P;
+                    candidateW = W;
+                }
+            }
+        }
+
+        /* برای ورود به LOCK سه فریم خوب؛ برای خروج پنج فریم بد */
+        if (candidate)
+        {
+            if (goodFrames < 3U) goodFrames++;
+            badFrames = 0U;
+
+            if (!lockState && goodFrames >= 3U)
+            {
+                lockState = 1U;
+                lockP = candidateP;
+                lockW = candidateW;
+                lockHi = hiD;
+                lockLo = loD;
+            }
+            else if (lockState)
+            {
+                /* هموارسازی تغییرات جزئی پریود و عرض پالس */
+                lockP = lockP * 0.75f + candidateP * 0.25f;
+                lockW = lockW * 0.75f + candidateW * 0.25f;
+
+                lockHi = lockHi * 0.75f + hiD * 0.25f;
+                lockLo = lockLo * 0.75f + loD * 0.25f;
+            }
+        }
+        else
+        {
+            goodFrames = 0U;
+
+            if (badFrames < 5U) badFrames++;
+
+            if (badFrames >= 5U)
+                lockState = 0U;
+        }
+
+        if (lockState && lockP >= 8.0f &&
+            lockW > 1.0f && lockW < lockP)
+        {
+            fold = 1U;
+
+            dutyF = 100.0f * lockW / lockP;
+            hzD = 1.0f / (lockP * dt);
+
+            const float invP = 1.0f / lockP;
+            const float dth = lockW * invP;
+
+            for (uint32_t j = 0U; j < SC_SHOW; j++)
+            {
+                s_scR[j] =
+                    (sc_frac((float)j * invP - 0.04f) < dth &&
+                     sc_frac((float)j * invP - 0.04f) >= 0.0f)
+                    ? lockHi : lockLo;
+            }
+
+            dv = s_scR;
+            start = 0U;
+        }
+//        if (!fold && sig)
+//        {
+//            const float midv = 0.5f * (vLo + vHi);
+//            for (uint32_t i = 1U; i < (SC_N - SC_SHOW); i++)
+//                if (dv[i - 1U] < midv && dv[i] >= midv) { start = i; break; }
+//        }
+
+        if (!fold && sig)
+        {
+            const float midv = 0.5f * (vLo + vHi);
+            uint8_t triggerFound = 0U;
+
+            for (uint32_t i = 1U; i < (SC_N - SC_SHOW); i++)
+            {
+                if (dv[i - 1U] < midv && dv[i] >= midv)
+                {
+                    start = i;
+                    triggerFound = 1U;
+                    break;
+                }
+            }
+
+            /* بدون Trigger معتبر، فریم جدید رسم نشود */
+            if (!triggerFound)
+                continue;
         }
 
         float    vtop  = vm_pick_scale(vHi);
-        uint32_t nShow = VM_SHOW / (uint32_t)k_zm[zi];
+        uint32_t nShow = SC_SHOW / (uint32_t)k_zm[zi];
         const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
         uint16_t prevY = 0xFFFFU;
 
@@ -1070,59 +1737,81 @@ static void App_Scope(void)
             uint32_t a = start + ((uint32_t)x * nShow) / LCD_WIDTH;
             uint32_t e = start + ((uint32_t)(x + 1U) * nShow) / LCD_WIDTH;
             if (e <= a) e = a + 1U;
-            if (e > VM_N) e = VM_N;
-            if (a >= VM_N) a = VM_N - 1U;
-            uint16_t lo = 65535U, hi = 0U;
+            if (e > SC_N) e = SC_N;
+            if (a >= SC_N) a = SC_N - 1U;
+            float lo = 1.0e9f, hi = -1.0e9f;
             for (uint32_t i = a; i < e; i++)
             {
-                if (s_vmBuf[i] < lo) lo = s_vmBuf[i];
-                if (s_vmBuf[i] > hi) hi = s_vmBuf[i];
+                if (dv[i] < lo) lo = dv[i];
+                if (dv[i] > hi) hi = dv[i];
             }
-            float fh = vm_counts_to_vin(hi) / vtop, fl = vm_counts_to_vin(lo) / vtop;
+            float fh = hi / vtop, fl = lo / vtop;
+            if (fh < 0.0f) fh = 0.0f; if (fl < 0.0f) fl = 0.0f;
             if (fh > 1.0f) fh = 1.0f; if (fl > 1.0f) fl = 1.0f;
             uint16_t yTop = (uint16_t)(yMax - (uint16_t)(fh * (float)(SCOPE_H - 1U)));
             uint16_t yBot = (uint16_t)(yMax - (uint16_t)(fl * (float)(SCOPE_H - 1U)));
             if (prevY != 0xFFFFU) { if (prevY < yTop) yTop = prevY; if (prevY > yBot) yBot = prevY; }
             if (yBot <= yTop) { if (yBot < yMax) yBot++; else yTop--; }
-            prevY = (uint16_t)(yMax - (uint16_t)(vm_counts_to_vin(s_vmBuf[e - 1U]) / vtop * (float)(SCOPE_H - 1U)));
+            {   float fy = dv[e - 1U] / vtop; if (fy < 0.0f) fy = 0.0f; if (fy > 1.0f) fy = 1.0f;
+                prevY = (uint16_t)(yMax - (uint16_t)(fy * (float)(SCOPE_H - 1U))); }
             if (prevY < yMin) prevY = yMin;
-            sc_col_bg(x, yMin, yTop);
-            LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
-            sc_col_bg(x, (uint16_t)(yBot + 1U), (uint16_t)(yMax + 1U));
+
+            if (s_scTop[x] == yTop && s_scBot[x] == yBot) continue;     /* ستون عوض نشده = دست نمی‌زنیم (بدون لرزش) */
+            if (s_scTop[x] == 0xFFFFU)
+            {
+                sc_col_bg(x, yMin, yTop);
+                LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
+                sc_col_bg(x, (uint16_t)(yBot + 1U), (uint16_t)(yMax + 1U));
+            }
+            else
+            {
+                uint16_t ot = s_scTop[x], ob = s_scBot[x];
+                if (ot < yTop) sc_col_bg(x, ot, (yTop < (uint16_t)(ob + 1U)) ? yTop : (uint16_t)(ob + 1U));
+                if (ob > yBot) sc_col_bg(x, (yBot + 1U > ot) ? (uint16_t)(yBot + 1U) : ot, (uint16_t)(ob + 1U));
+                LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
+            }
+            s_scTop[x] = yTop; s_scBot[x] = yBot;
         }
 
         float hz = 0.0f, duty = 0.0f; uint8_t tooFast = 0U;
-        uint8_t fok = sig ? vm_analyze((uint16_t)mn, (uint16_t)mx, cyc, &hz, &duty, &tooFast) : 0U;
+        uint8_t fok;
+        if (dig && sig && hzD > 0.0f) { hz = hzD; duty = dutyF; fok = 1U; }
+        else if (sig)
+        {
+            for (uint32_t i = 0U; i < VM_N; i++) s_vmBuf[i] = s_scBuf[i];          /* vm_analyze روی ۲۰۴۸ نمونه‌ی اول */
+            fok = vm_analyze((uint16_t)mn, (uint16_t)mx, (uint32_t)(((uint64_t)cyc * VM_N) / SC_N), &hz, &duty, &tooFast);
+        }
+        else fok = 0U;
+
         if (tb == 0U)
         {
             if (!sig) autoGapUs = VM_AUTO_DEF_US;
             else if (fok)
             {
-                float dtS   = ((float)cyc / (float)SystemCoreClock) / (float)VM_N;
-                float baseS = dtS - (float)gapUs * 1.0e-6f;
+                float baseS = dt - (float)gapUs * 1.0e-6f;
                 if (baseS < 1.0e-7f) baseS = 1.0e-7f;
-                float g = (VM_AUTO_PERIODS / (hz * (float)VM_SHOW) - baseS) * 1.0e6f;
+                float g = (SC_PERIODS / (hz * (float)SC_N) - baseS) * 1.0e6f;
                 if (g < 0.0f) g = 0.0f;
-                if (g > (float)VM_AUTO_MAX_US) g = (float)VM_AUTO_MAX_US;
+                if (g > (float)SC_AUTO_MAX_US) g = (float)SC_AUTO_MAX_US;
                 uint32_t gn = (uint32_t)(g + 0.5f);
                 uint32_t df = (gn > autoGapUs) ? (gn - autoGapUs) : (autoGapUs - gn);
-                if (df * 4U > autoGapUs + 2U) autoGapUs = gn;
+                if (df * 2U > autoGapUs + 4U) autoGapUs = gn;   /* فقط با تغییر بیش از ۵۰٪ تایم‌بیس عوض بشه */
             }
             else if (tooFast) autoGapUs = 0U;
-            else { autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > VM_AUTO_MAX_US) autoGapUs = VM_AUTO_MAX_US; }
+            else { autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > SC_AUTO_MAX_US) autoGapUs = SC_AUTO_MAX_US; }
         }
 
         char b[40], t1[12], t2[12], t3[12];
         UI_FmtFixed(t1, sizeof t1, vHi, 1U);
         if (fok) { UI_FmtFixed(t2, sizeof t2, hz / 1000.0f, 2U); UI_FmtFixed(t3, sizeof t3, duty, 0U); }
         else     { snprintf(t2, sizeof t2, "--"); snprintf(t3, sizeof t3, "--"); }
-        snprintf(b, sizeof b, "H%sV %skHz D%s%% %s   ", t1, t2, t3, sineOn ? "S" : "");
+        snprintf(b, sizeof b, "H%sV %skHz D%s%%   ", t1, t2, t3);
         UI_Text(2U, 206U, 1U, UI_DIM, UI_BG, b);
-        snprintf(b, sizeof b, "TB:%s Z:x%u   ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi]);
+        snprintf(b, sizeof b, "TB:%s Z:x%u %s J%u%% e%u  ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", (unsigned)(jit * 100.0f), (unsigned)s_scNe);
         UI_Text(2U, 218U, 1U, UI_DIM, UI_BG, b);
         LED_Blue_Set(sig);
     }
-    Probe_DacSineStop();
+    Probe_DacOff();
     LEDs_AllOff();
 }
 
@@ -1130,36 +1819,50 @@ static void App_Scope(void)
 /*  Wiring test (تست سیم‌کشی)                                           */
 /*                                                                      */
 /*  سناریو: یه سر سیم به ECU ماشین وصله، سر دیگه بیرونه.                    */
-/*   - Probe2 رو به سر آزاد سیم وصل کن: یه PWM مشخص توی سیم می‌فرسته.        */
-/*   - Probe1 رو (سوزنی / back-probe) روی نقطه‌های مختلف سیم بذار و بکش جلو.  */
-/*   - تا جایی که Probe1 همون PWM رو بگیره = سیم تا اونجا سالمه (WIRE OK ،    */
-/*     بوق ممتد). از هر جایی که نگرفت = سیم بین اون نقطه و Probe2 قطعه.        */
+/*   - Probe2 رو به سر آزاد سیم وصل کن: یه PWM مشخص (۵۰٪) توی سیم می‌فرسته.   */
+/*   - فقط Probe1 رو (سوزنی / back-probe) روی نقطه‌های مختلف سیم بکش.        */
+/*   - هر جا Probe1 همون PWM رو (با تلورانس) بگیره = سیم تا اونجا سالمه.        */
+/*     هر جا نگرفت = سیم بین اون نقطه و Probe2 قطعه -> دستگاه بوق می‌زنه.        */
 /*                                                                      */
-/*  چون سر دیگه به ECU وصله و بار می‌ذاره، دامنه/دیوتی موج ممکنه با حالت       */
-/*  ایده‌آل فرق کنه. پس اول Probe1 رو بذار روی همون نقطه‌ی تزریق (کنار Probe2)  */
-/*  و OK بزن تا شکل موج «سالم» به‌عنوان مرجع یاد گرفته بشه؛ بعد هر جا شبیه       */
-/*  مرجع بود = سالم.                                                       */
+/*  روش تشخیص (هم‌زمان‌شده با PWM، lock-in):                               */
+/*   - ADC دقیقاً ۲۴ نمونه در هر پریود PWM می‌گیره (زمان‌بندی قطعی داخل RAM)     */
+/*     روی ۸ پریود. چون PWM و نمونه‌برداری هر دو از یک کریستال‌اند، فرکانس        */
+/*     «دقیقاً» معلومه و فقط روی همون فرکانس DFT می‌گیریم.                      */
+/*   - swing  = دامنه‌ی معادل موج مربعی (ولت)                                */
+/*   - purity = سهم انرژی موج که روی فرکانس ارسالی ماست (نویز/سیگنال ECU = کم)   */
+/*   - lock   = هم‌فازی نیمه‌ی اول و دوم پنجره؛ تلورانس فرکانس ≈ ±۳٪            */
+/*  چون سر دیگه به ECU وصله و بار می‌ذاره، با OK روی نقطه‌ی تزریق (کنار Probe2)   */
+/*  شکل موج «سالم» به‌عنوان مرجع یاد گرفته می‌شه؛ بعد هر جا حداقل ۵۰٪ دامنه‌ی     */
+/*  مرجع رو داشت = سالم.                                                  */
 /* ================================================================== */
 typedef enum { WT_OK = 0, WT_NO_SIGNAL, WT_WEAK, WT_NOISY, WT_TOO_FAST } WtState_t;
 
-static const char *const k_wtReason[] = { "match", "no signal", "weak", "irregular", "too fast" };
-static const uint32_t    k_wtFreq[] = { 100U, 200U, 500U, 1000U, 2000U, 10000U };
+static const char *const k_wtReason[] = { "match", "no signal", "weak", "not our PWM", "too fast" };
+static const uint32_t    k_wtFreq[] = { 200U, 500U, 1000U, 2000U, 5000U };
 #define WT_FREQ_COUNT      ((uint8_t)(sizeof(k_wtFreq) / sizeof(k_wtFreq[0])))
-#define WT_DUTY            50U
-#define WT_MIN_SWING_V     0.3f     /* بدون مرجع: دامنه‌ی کمتر از این = ضعیف */
-#define WT_NOISE_V         0.1f     /* دامنه‌ی کمتر از این = اصلاً سیگنالی نیست */
-#define WT_REF_FRACTION    0.35f    /* با مرجع: دامنه باید حداقل این کسر از مرجع باشه */
-#define WT_PURITY_MIN      0.25f    /* سهم انرژی موج که دقیقاً روی فرکانس ارسالی ماست (نویز/سیگنال دیگه = کم) */
+#define WT_FREQ_DEFAULT    2U                 /* 1000 Hz */
+#define WT_DUTY            50U                /* دیوتی PWM ارسالی (٪) */
 
-/* نتیجه‌ی یک اندازه‌گیری روی Probe1.
- * روش: تشخیص هم‌فرکانس (DFT فقط روی فرکانس خودمون) ؛ به لبه‌ها و دقت نمونه‌برداری وابسته نیست. */
+#define WT_SPP             24U                /* نمونه در هر پریود PWM */
+#define WT_PERIODS         8U                 /* تعداد پریود در هر اندازه‌گیری (~8ms @1kHz) */
+#define WT_N               (WT_SPP * WT_PERIODS)
+
+/* ---- تلورانس‌ها (اینجا تنظیم کن) ---- */
+#define WT_NOISE_V         0.10f    /* دامنه‌ی کمتر از این = اصلاً سیگنالی نیست */
+#define WT_MIN_SWING_V     0.30f    /* بدون مرجع: حداقل دامنه */
+#define WT_REF_FRACTION    0.50f    /* با مرجع: دامنه باید حداقل این کسر از مرجع باشه (تلورانس دامنه) */
+#define WT_PURITY_MIN      0.35f    /* حداقل سهم انرژی روی فرکانس ما (موج مربعی ایده‌آل ≈ ۰٫۸۱) */
+#define WT_PURITY_REF_FR   0.60f    /* با مرجع: purity باید حداقل این کسر از مرجع باشه */
+#define WT_LOCK_MIN        0.85f    /* هم‌فازی دو نیمه‌ی پنجره (≈ تلورانس فرکانس ±۳٪) */
+#define WT_BAD_FRAMES      2U       /* چند اندازه‌گیری ناموفق پشت‌سرهم تا «قطع» اعلام بشه */
+#define WT_GOOD_FRAMES     2U       /* چند اندازه‌گیری موفق پشت‌سرهم تا «سالم» اعلام بشه */
+
 typedef struct {
     float   swing;      /* دامنه‌ی معادل موج مربعی (پیک تا پیک، ولت) */
-    float   purity;     /* 0..1 : چقدر از موج همون فرکانس ارسالی است */
-    uint8_t tooFast;    /* 1 = نمونه‌برداری برای این فرکانس کافی نیست */
-    float   freq;       /* فرکانسی که واقعاً پیدا شد (Hz) */
-    float   ratio;      /* قله / زمینه */
+    float   purity;     /* 0..1 */
+    float   lock;       /* 0..1 : هم‌فازی دو نیمه‌ی پنجره */
     float   pp;         /* پیک‌تاپیک خام (ولت) */
+    uint8_t tooFast;    /* 1 = نمونه‌برداری برای این فرکانس کافی نیست */
 } WtMeas_t;
 
 /* شکل موج «سالم» که کاربر یاد داده */
@@ -1170,16 +1873,16 @@ static WtState_t wt_check(const WtMeas_t *m, const WtRef_t *ref)
     if (m->tooFast) return WT_TOO_FAST;
     float minSw = ref->valid ? (ref->swing * WT_REF_FRACTION) : WT_MIN_SWING_V;
     if (minSw < WT_NOISE_V) minSw = WT_NOISE_V;
-    float minPu = ref->valid ? (ref->purity * 0.5f) : WT_PURITY_MIN;
+    float minPu = ref->valid ? (ref->purity * WT_PURITY_REF_FR) : WT_PURITY_MIN;
     if (minPu < WT_PURITY_MIN) minPu = WT_PURITY_MIN;
 
-    if (m->swing < WT_NOISE_V) return WT_NO_SIGNAL;          /* هیچ نوسانی نیومده */
-    if (m->purity < minPu)     return WT_NOISY;              /* نوسان هست ولی همون موج ما نیست */
-    if (m->swing < minSw)      return WT_WEAK;
+    if (m->swing < WT_NOISE_V)  return WT_NO_SIGNAL;         /* هیچ نوسانی نیومده */
+    if (m->purity < minPu || m->lock < WT_LOCK_MIN) return WT_NOISY;   /* نوسان هست ولی همون PWM ما نیست */
+    if (m->swing < minSw)       return WT_WEAK;
     return WT_OK;
 }
 
-/* sin/cos بدون libm: برای 0 <= w <= ~3 rad ، تیلور روی w/4 و بعد دو بار زاویه‌ی دوبرابر */
+/* sin/cos بدون libm (لینکر libm رو دور می‌ریزه): برای 0 <= w <= ~3 rad ، تیلور روی w/4 و بعد دو بار زاویه‌ی دوبرابر */
 static void wt_sincos(float w, float *sn, float *cs)
 {
     float a = w * 0.25f, a2 = a * a;
@@ -1194,83 +1897,76 @@ static void wt_sincos(float w, float *sn, float *cs)
     *sn = s; *cs = c;
 }
 
-/* مثل vm_counts_to_vin ولی خطی (Adc_PinToVinLinear، بدون کلمپ زیر صفر/خم زانو).
- * اون تصحیح مخصوص ولت‌متر DCه؛ روی موج کوچیک تست سیم‌کشی (مخصوصاً تغذیه‌ی پایین
- * یا سیم واقعی با بار) نصف پایین موج رو صاف می‌کنه و DFT رو خراب می‌کنه. */
+/* خطی، بدون کلمپ زیر صفر (Adc_PinToVinLinear): تصحیح مخصوص ولت‌متر DC موج کوچیک رو خراب می‌کنه */
 static float wt_counts_to_vin(uint32_t c)
 {
     return Adc_PinToVinLinear((float)c * 3.3f / 65535.0f);
 }
 
-/* Probe1 رو از مسیر DC خودش (PC4 ، همون مسیر ولت‌متر) می‌خونه، نه PB1 که خازنی کوپل شده.
- * پنجره ≈ ۴ پریود PWM (یا سریع‌ترین نمونه‌برداری ممکن). */
-#define WT_MAX_BINS 420U
-static void wt_measure(uint32_t fset, WtMeas_t *m)
+/* فرکانس واقعی PWM از روی رجیسترهای TIM15 (همون فرمول Probe_PwmStart) */
+static float wt_pwm_actual_hz(void)
 {
+    float tclk = (float)(HAL_RCC_GetPCLK2Freq() * 2U);
+    return tclk / (((float)TIM15->PSC + 1.0f) * ((float)TIM15->ARR + 1.0f));
+}
+
+/* یک اندازه‌گیری روی Probe1 (مسیر PC4 = خروجی OPAMP، امپدانس پایین).
+ * گام نمونه‌برداری طوری انتخاب می‌شه که دقیقاً WT_SPP نمونه در هر پریود PWM باشه. */
+static void wt_measure(WtMeas_t *m)
+{
+    static float x[WT_N];
     memset(m, 0, sizeof *m);
-    uint32_t per = (uint32_t)(((uint64_t)SystemCoreClock * 4U) / fset) / VM_N;
-    uint32_t gap = (per > 300U) ? (per - 300U) : 0U;
-    uint32_t cyc = Adc_CapturePC4(s_vmBuf, VM_N, gap);
+
+    const float f    = wt_pwm_actual_hz();
+    uint32_t    step = (uint32_t)((float)SystemCoreClock / (f * (float)WT_SPP) + 0.5f);
+    if (step < ADC_CAP_MIN_STEP_CYC + 60U) { m->tooFast = 1U; return; }
+
+    uint32_t cyc = Adc_CapturePC4(s_vmBuf, WT_N, step - ADC_CAP_MIN_STEP_CYC);
     if (cyc == 0U) return;
+    uint32_t stepEff = cyc / WT_N;
+    if (stepEff > step + 1U) { m->tooFast = 1U; return; }          /* ADC به این گام نمی‌رسه */
 
-    float dt  = ((float)cyc / (float)SystemCoreClock) / (float)VM_N;   /* فاصله‌ی واقعی نمونه‌ها */
-    float spp = 1.0f / ((float)fset * dt);                              /* نمونه در هر پریود */
-    if (spp < 2.5f) { m->tooFast = 1U; return; }
-    uint32_t n = VM_N;
-    if ((float)n > 40.0f * spp) n = (uint32_t)(40.0f * spp);           /* حداکثر ~۴۰ پریود (سرعت محاسبه) */
-    float periods = (float)n / spp;
-    if (n < 16U || periods < 2.0f) return;
+    const float dt = (float)stepEff / (float)SystemCoreClock;
+    const float w  = 6.2831853f * f * dt;                          /* رادیان در هر نمونه */
+    float sw, cw;
+    wt_sincos(w, &sw, &cw);
 
-    static float x[VM_N];
     float mean = 0.0f, mn = 1.0e9f, mx = -1.0e9f;
-    for (uint32_t i = 0U; i < n; i++)
+    for (uint32_t i = 0U; i < WT_N; i++)
     {
-        x[i] = wt_counts_to_vin(s_vmBuf[i]); mean += x[i];
+        x[i] = wt_counts_to_vin(s_vmBuf[i]);
+        mean += x[i];
         if (x[i] < mn) mn = x[i];
         if (x[i] > mx) mx = x[i];
     }
-    mean /= (float)n;
-    for (uint32_t i = 0U; i < n; i++) x[i] -= mean;
+    mean /= (float)WT_N;
     m->pp = mx - mn;
 
-    /* جستجوی فرکانس: ۰.۳× تا ۲× فرکانس ارسالی؛ قله نسبت به «زمینه» (میانگین بقیه‌ی فرکانس‌ها)
-     * سنجیده می‌شه، پس نویز پهن‌باند و کمی اختلاف فرکانس مشکلی ایجاد نمی‌کنه. */
-    static float amp[WT_MAX_BINS];
-    float step = 0.2f / periods;
-    uint32_t nb = 0U, pk = 0U;
-    float r = 0.3f;
-    for (; nb < WT_MAX_BINS && r <= 2.0f; nb++, r += step)
+    /* DFT تک‌فرکانسی؛ جمع‌های جداگانه برای نیمه‌ی اول و دوم (برای lock) */
+    float c = 1.0f, s = 0.0f, var = 0.0f;
+    float re1 = 0.0f, im1 = 0.0f, re2 = 0.0f, im2 = 0.0f;
+    for (uint32_t i = 0U; i < WT_N; i++)
     {
-        float sw, cw;
-        float w = 6.2831853f * (float)fset * r * dt;
-        if (w > 3.0f) break;
-        wt_sincos(w, &sw, &cw);
-        float c = 1.0f, s = 0.0f, re = 0.0f, im = 0.0f;
-        for (uint32_t i = 0U; i < n; i++)
-        {
-            re += x[i] * c;
-            im -= x[i] * s;
-            float cn = c * cw - s * sw;
-            s = s * cw + c * sw;
-            c = cn;
-        }
-        amp[nb] = 2.0f * __builtin_sqrtf(re * re + im * im) / (float)n;
-        if (amp[nb] > amp[pk]) pk = nb;
+        float xi = x[i] - mean;
+        var += xi * xi;
+        if (i < (WT_N / 2U)) { re1 += xi * c; im1 -= xi * s; }
+        else                 { re2 += xi * c; im2 -= xi * s; }
+        float cn = c * cw - s * sw;
+        s = s * cw + c * sw;
+        c = cn;
     }
-    if (nb < 8U) return;
-    float bg = 0.0f; uint32_t nbg = 0U;
-    for (uint32_t i = 0U; i < nb; i++)
-    {
-        uint32_t d = (i > pk) ? (i - pk) : (pk - i);
-        if (d > 3U) { bg += amp[i]; nbg++; }
-    }
-    bg = (nbg != 0U) ? bg / (float)nbg : 0.0f;
-    float ratio = amp[pk] / (bg + 1.0e-6f);
-    m->swing = amp[pk] * 1.5707963f;
-    m->freq  = (float)fset * (0.3f + step * (float)pk);
-    m->ratio = ratio;
-    float p = 1.0f - 3.0f / ratio;                      /* ratio ≈ 3 یعنی فقط نویز */
-    m->purity = (p < 0.0f) ? 0.0f : ((p > 1.0f) ? 1.0f : p);
+    var /= (float)WT_N;
+
+    const float re = re1 + re2, im = im1 + im2;
+    const float a1 = 2.0f * __builtin_sqrtf(re * re + im * im) / (float)WT_N;     /* دامنه‌ی هارمونیک اول */
+    m->swing = a1 * 1.5707963f;                                                   /* ×π/2 : معادل موج مربعی ۵۰٪ */
+    float pu = (var > 1.0e-6f) ? (0.5f * a1 * a1) / var : 0.0f;
+    m->purity = (pu < 0.0f) ? 0.0f : ((pu > 1.0f) ? 1.0f : pu);
+
+    const float n1 = __builtin_sqrtf(re1 * re1 + im1 * im1);
+    const float n2 = __builtin_sqrtf(re2 * re2 + im2 * im2);
+    const float nt = __builtin_sqrtf(re * re + im * im);
+    m->lock = ((n1 + n2) > 1.0e-6f) ? nt / (n1 + n2) : 0.0f;
 }
 
 /* خط رو فقط وقتی متن/رنگش عوض شده دوباره می‌کشه (بدون چشمک) */
@@ -1298,17 +1994,18 @@ static void wt_buzzer(uint8_t on)
 }
 
 /* مرجع: ۶ اندازه‌گیری پشت‌سرهم از موج سالم؛ حداقل ۵ تاش باید معتبر باشه */
-static uint8_t wt_learn(uint32_t fset, WtRef_t *ref)
+static uint8_t wt_learn(WtRef_t *ref)
 {
     float sw = 0.0f, pu = 0.0f; uint8_t good = 0U;
     for (uint8_t i = 0U; i < 6U; i++)
     {
         WtMeas_t m;
-        wt_measure(fset, &m);
-        if (!m.tooFast && m.swing >= WT_MIN_SWING_V && m.purity >= WT_PURITY_MIN)
+        wt_measure(&m);
+        if (!m.tooFast && m.swing >= WT_MIN_SWING_V && m.purity >= WT_PURITY_MIN && m.lock >= WT_LOCK_MIN)
         {
             sw += m.swing; pu += m.purity; good++;
         }
+        HAL_Delay(5);
     }
     if (good < 5U) return 0U;
     ref->valid  = 1U;
@@ -1317,70 +2014,91 @@ static uint8_t wt_learn(uint32_t fset, WtRef_t *ref)
     return 1U;
 }
 
+/* ================================================================== */
+/*  کلیدها:  OK = یاد گرفتن مرجع (Probe1 کنار Probe2 روی سیم سالم)          */
+/*           L/R = حالت بوق (قطع / سالم / بی‌صدا)   U/D = فرکانس تست        */
+/* ================================================================== */
 static void App_WiringTest(void)
 {
-    LEDs_AllOff();
-    UI_Begin("WIRING TEST");
-    UI_Hint("OK learn ref L/R freq U/D snd");
+    static const char *const k_beepName[3] = { "on BREAK", "on OK   ", "OFF     " };
 
-    uint8_t   fi = 3U;                               /* 1000 Hz: پاسخ سریع موقع کشیدن پروب */
+    LEDs_AllOff();
+    Probe_AllOff();                                   /* پول‌آپ/DAC/اهم‌متر خاموش؛ Probe1 فقط Hi-Z و خواننده */
+    UI_Begin("WIRING TEST");
+    UI_Hint("OK ref L/R beep U/D freq");
+    UI_Row(0U, UI_FG, UI_BG, "P2 PWM > P1 reads");
+
+    uint8_t   fi = WT_FREQ_DEFAULT, beepMode = 0U, restart = 1U;
+    uint8_t   broken = 1U, okRun = 0U, badRun = 0U, shown = 2U;
     uint32_t  pass = 0U, fail = 0U, drops = 0U;
-    WtState_t prev = WT_OK;
-    uint8_t   restart = 1U, snd = 1U;
     WtRef_t   ref = {0U, 0.0f, 0.0f};
     char      msg[20] = "";
     uint32_t  msgUntil = 0U;
     uint32_t  last = 0U - 1000U;
     uint16_t  barW = 0xFFFFU, barCol = 0U;
-
-    WtLine_t ln[8];
+    WtLine_t  ln[8];
     memset(ln, 0, sizeof ln);
-
-    UI_Row(0U, UI_FG, UI_BG, "P2 PWM > P1 ADC");
 
     for (;;)
     {
         MenuInput_t in = UI_Poll();
         if (in == MENU_INPUT_BACK) break;
-        if (in == MENU_INPUT_RIGHT) { fi = (uint8_t)((fi + 1U) % WT_FREQ_COUNT); restart = 1U; ref.valid = 0U; }
-        if (in == MENU_INPUT_LEFT)  { fi = (uint8_t)((fi + WT_FREQ_COUNT - 1U) % WT_FREQ_COUNT); restart = 1U; ref.valid = 0U; }
-        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN) snd = (uint8_t)!snd;
+        if (in == MENU_INPUT_UP)    { fi = (uint8_t)((fi + 1U) % WT_FREQ_COUNT); restart = 1U; ref.valid = 0U; }
+        if (in == MENU_INPUT_DOWN)  { fi = (uint8_t)((fi + WT_FREQ_COUNT - 1U) % WT_FREQ_COUNT); restart = 1U; ref.valid = 0U; }
+        if (in == MENU_INPUT_RIGHT) beepMode = (uint8_t)((beepMode + 1U) % 3U);
+        if (in == MENU_INPUT_LEFT)  beepMode = (uint8_t)((beepMode + 2U) % 3U);
 
         if (restart)
         {
             restart = 0U;
-            Probe_PwmStart(PROBE_2, k_wtFreq[fi], WT_DUTY);     /* Probe2 خروجی می‌ده ، Probe1 فقط می‌خونه */
+            Probe_PwmStart(PROBE_2, k_wtFreq[fi], WT_DUTY);      /* Probe2 خروجی می‌ده ، Probe1 Hi-Z می‌مونه */
             HAL_Delay(10);
+            okRun = 0U; badRun = 0U; broken = 1U; shown = 2U;
             last = 0U - 1000U;
         }
-        if (in == MENU_INPUT_SELECT)                            /* Probe1 باید روی نقطه‌ی سالم (کنار Probe2) باشه */
+        if (in == MENU_INPUT_SELECT)                             /* Probe1 باید روی نقطه‌ی سالم (کنار Probe2) باشه */
         {
             wt_buzzer(0U);
-            snprintf(msg, sizeof msg, "%s", wt_learn(k_wtFreq[fi], &ref) ? "Ref saved" : "No signal!");
+            snprintf(msg, sizeof msg, "%s", wt_learn(&ref) ? "Ref saved" : "No signal!");
             msgUntil = HAL_GetTick() + 1500U;
-            pass = 0U; fail = 0U; drops = 0U; prev = WT_OK;
+            pass = 0U; fail = 0U; drops = 0U; okRun = 0U; badRun = 0U;
             last = 0U - 1000U;
         }
-        if (!TICK_DUE(last, 40U)) continue;
+        if (!TICK_DUE(last, 30U)) continue;
         last = HAL_GetTick();
 
         WtMeas_t m;
-        wt_measure(k_wtFreq[fi], &m);
+        wt_measure(&m);
         WtState_t st = wt_check(&m, &ref);
 
-        if (st == WT_OK) { if (pass < 99999U) pass++; }
-        else             { if (fail < 99999U) fail++; }
-        if (prev == WT_OK && st != WT_OK && drops < 9999U) drops++;   /* قطع‌ووصل لحظه‌ای */
-        prev = st;
-        LED_Blue_Set(st == WT_OK);
-        wt_buzzer((uint8_t)(snd && st != WT_OK));              /* بوق ممتد = سیگنال می‌رسه (چشم لازم نیست) */
+        /* دیبانس: چند اندازه‌گیری پشت‌سرهم لازمه تا وضعیت عوض بشه (کشیدن پروب = تماس لحظه‌ای) */
+        if (st == WT_OK)
+        {
+            if (pass < 99999U) pass++;
+            badRun = 0U;
+            if (okRun < 250U) okRun++;
+            if (broken && okRun >= WT_GOOD_FRAMES) broken = 0U;
+        }
+        else
+        {
+            if (fail < 99999U) fail++;
+            okRun = 0U;
+            if (badRun < 250U) badRun++;
+            if (!broken && badRun >= WT_BAD_FRAMES) { broken = 1U; if (drops < 9999U) drops++; }
+        }
+        LED_Blue_Set((uint8_t)!broken);
+        wt_buzzer((uint8_t)(((beepMode == 0U) && broken) || ((beepMode == 1U) && !broken)));
 
         char b[32], t1[12], t2[12];
-        uint16_t col = (st == WT_OK) ? UI_OK : UI_BAD;
-        float swing = m.swing;
+        uint16_t col = broken ? UI_BAD : UI_OK;
 
         /* وضعیت بزرگ */
-        UI_Text(4U, 96U, 3U, col, UI_BG, (st == WT_OK) ? "WIRE OK" : "BROKEN");
+        if (shown != broken)
+        {
+            shown = broken;
+            LCD_FillRect(0U, 96U, LCD_WIDTH, 28U, UI_BG);
+            UI_Text(4U, 96U, 3U, col, UI_BG, broken ? "BROKEN" : "WIRE OK");
+        }
 
         if (HAL_GetTick() < msgUntil)
         {
@@ -1392,42 +2110,34 @@ static void App_WiringTest(void)
             wt_row(&ln[1], 1U, UI_CYAN, b);
         }
 
-        UI_FmtFixed(t1, sizeof t1, swing, 1U);
+        UI_FmtFixed(t1, sizeof t1, m.swing, 1U);
         if (ref.valid) { UI_FmtFixed(t2, sizeof t2, ref.swing, 1U); snprintf(b, sizeof b, "Amp%s Ref%sV", t1, t2); }
         else           { snprintf(b, sizeof b, "Amp%sV  no ref", t1); }
         wt_row(&ln[4], 4U, UI_FG, b);
 
-        snprintf(b, sizeof b, "Match %u%%", (unsigned)(m.purity * 100.0f + 0.5f));
+        snprintf(b, sizeof b, "Match %u%% Lock %u%%", (unsigned)(m.purity * 100.0f + 0.5f), (unsigned)(m.lock * 100.0f + 0.5f));
         wt_row(&ln[5], 5U, UI_ORANGE, b);
-
-        {
-            char fs[12], ps[10];
-            if (m.freq < 1000.0f) { UI_FmtFixed(fs, sizeof fs, m.freq, 0U); strcat(fs, "Hz"); }
-            else { UI_FmtFixed(fs, sizeof fs, m.freq / 1000.0f, 1U); strcat(fs, "kHz"); }
-            UI_FmtFixed(ps, sizeof ps, m.pp, 1U);
-            snprintf(b, sizeof b, "pp%sV %s x%u", ps, fs, (unsigned)(m.ratio + 0.5f));
-            wt_row(&ln[6], 6U, UI_DIM, b);
-        }
 
         /* نوار دامنه نسبت به مرجع (بدون مرجع: نسبت به ۵ ولت) */
         {
             float full = ref.valid ? ref.swing : 5.0f;
-            float fr = (full > 0.1f) ? swing / full : 0.0f;
+            float fr = (full > 0.1f) ? m.swing / full : 0.0f;
             if (fr > 1.0f) fr = 1.0f;
             if (fr < 0.0f) fr = 0.0f;
             uint16_t w = (uint16_t)(fr * 228.0f);
             if (w != barW || col != barCol) { barW = w; barCol = col; wt_bar(w, col); }
         }
 
-        snprintf(b, sizeof b, "Drops %lu Snd:%s", (unsigned long)drops, snd ? "ON" : "OFF");
+        snprintf(b, sizeof b, "Drops %lu Beep %s", (unsigned long)drops, k_beepName[beepMode]);
         wt_row(&ln[7], 7U, (drops != 0U) ? UI_BAD : UI_OK, b);
 
-        snprintf(b, sizeof b, "Ok%lu Bad%lu %s", (unsigned long)pass, (unsigned long)fail, k_wtReason[st]);
+        snprintf(b, sizeof b, "Ok%lu Bad%lu %s   ", (unsigned long)pass, (unsigned long)fail, k_wtReason[st]);
         UI_Text(4U, 212U, 1U, UI_DIM, UI_BG, b);
     }
     wt_buzzer(0U);
     LED_Blue_Set(0);
     Probe_PwmStop();
+    Probe_AllOff();
     LEDs_AllOff();
 }
 
@@ -1597,7 +2307,7 @@ static void SensorRun(uint8_t idx)
             snprintf(b, sizeof b, "%-6ld", (long)v);
             LCD_FillRect(0U, 50U, LCD_WIDTH, 102U, UI_BG);
             {   /* اسم کامل سنسور ؛ اگه از ۲۰ حرف بیشتر بود ریزتر می‌شه */
-                uint8_t ns = (strlen(d->name) * 12U <= 232U) ? 2U : 1U;
+                uint8_t ns = (strlen(d->name) * 14U <= 232U) ? 2U : 1U;
                 UI_Text(4U, 52U, ns, UI_TITLE, UI_BG, d->name);
             }
             UI_Text(10U, 74U, 4U, on ? UI_WHITE : UI_DIM, UI_BG, b);
@@ -1750,16 +2460,16 @@ static void App_SensorSim(void)
             LCD_FillRect(78U, 58U, 84U, 84U, UI_BG);
             SensorIcon(idx, 88U, 68U, 2U);
             /* اسم */
-            uint8_t nsc = (strlen(d->name) * 12U <= 232U) ? 2U : 1U;
-            uint16_t w = (uint16_t)(strlen(d->name) * 6U * nsc);
+            uint8_t nsc = (strlen(d->name) * 14U <= 232U) ? 2U : 1U;
+            uint16_t w = (uint16_t)(strlen(d->name) * 7U * nsc);
             UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), (uint16_t)(nsc == 2U ? 152U : 156U), nsc, UI_TITLE, UI_BG, d->name);
             const char *kind = (d->kind <= SS_FREQ_SPEED) ? "PWM output" : (d->kind >= SS_DUAL_PEDAL) ? "DAC output P1+P2" : "DAC output P1";
-            w = (uint16_t)(strlen(kind) * 6U);
+            w = (uint16_t)(strlen(kind) * 7U);
             UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), 176U, 1U, UI_DIM, UI_BG, kind);
             /* شماره */
             char b[12];
             snprintf(b, sizeof b, "%u/%u", (unsigned)(idx + 1U), (unsigned)SENSOR_COUNT);
-            w = (uint16_t)(strlen(b) * 12U);
+            w = (uint16_t)(strlen(b) * 14U);
             UI_Text((uint16_t)((LCD_WIDTH - w) / 2U), 192U, 2U, th->light, UI_BG, b);
             /* مثلث‌های چپ/راست */
             for (int r = -10; r <= 10; r++)

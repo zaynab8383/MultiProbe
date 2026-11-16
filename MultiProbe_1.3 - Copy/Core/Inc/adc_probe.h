@@ -11,6 +11,9 @@ float Adc_PinToVin(float pin_volts);   /* ولتاژ پایه‌ی PC4 -> ولت
  * صاف (دقیقاً صفر) می‌کنه که روی یک موج متناوب کوچیک کل نصف پایین موج رو از
  * بین می‌بره و امضای فرکانسی رو خراب می‌کنه. */
 float Adc_PinToVinLinear(float pin_volts);
+/* حداقل گام بین دو نمونه‌ی Adc_CapturePC4 (سیکل CPU، ~1.3us @280MHz). گام واقعی = این + gap_cycles.
+ * Adc_CapturePC4 مقدار برگشتی = (گام واقعی × n)؛ یعنی فاصله‌ی نمونه‌ها دقیقاً یکنواخته: dt = ret / n / SystemCoreClock */
+#define ADC_CAP_MIN_STEP_CYC  360U
 /* n نمونه‌ی سریع از PC4 (بدون میانگین). gap_cycles = فاصله‌ی اضافه بین نمونه‌ها (سیکل CPU).
  * خروجی: تعداد سیکل CPU کل، 0 = خطا */
 uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles);
