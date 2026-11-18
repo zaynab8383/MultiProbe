@@ -18,7 +18,7 @@ extern OPAMP_HandleTypeDef hopamp1;
  * اندازه‌گیری روی برد: ورودی 12V با ضریب 11 حدود 9V نشون می‌داد  =>  11 × 12 / 9 = 14.67
  * اگه عدد روی نوار بالا با مولتی‌متر فرق داشت، فقط همین عدد رو درست کن
  * (یا موقتاً با بالا/پایین توی صفحه‌ی اصلی؛ اون با ریست از بین می‌ره). */
-#define SUPPLY_DIVIDER 14.67f
+#define SUPPLY_DIVIDER 14.01f
 static float s_supplyScale = SUPPLY_DIVIDER;   /* با دکمه‌های بالا/پایین توی صفحه‌ی اصلی قابل تنظیمه */
 
 static uint32_t read_raw(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling)

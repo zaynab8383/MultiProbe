@@ -374,6 +374,20 @@ static const OhmRange_t k_ohmRanges[OHM_RANGES] = OHM_RANGE_TABLE;
 /* مقاومت سری مسیر Probe2 -> GND (R35 + بافر)؛ از هر اندازه‌گیری کم می‌شه */
 static float s_ohmSeries = OHM_SERIES_DEFAULT;
 
+/* exp بدون libm (دقت ~۰٫۱٪ برای |x|<20) */
+static float ohm_exp(float x)
+{
+    if (x > 20.0f) x = 20.0f;
+    if (x < -20.0f) x = -20.0f;
+    float y = x * 1.4426950f;                       /* 2^y */
+    int32_t n = (int32_t)(y + (y >= 0.0f ? 0.5f : -0.5f));
+    float f = y - (float)n;                         /* |f| <= 0.5 */
+    float p = 1.0f + f * (0.6931472f + f * (0.2402265f + f * (0.0555041f + f * 0.0096181f)));
+    while (n > 0) { p *= 2.0f; n--; }
+    while (n < 0) { p *= 0.5f; n++; }
+    return p;
+}
+
 /* Rx (قبل از کم‌کردن مقاومت سری) برحسب اهم؛ منفی = OPEN. vpin = ولتاژ واقعی Probe1.
  * ⚠ PB1 (ADC1_IN5) از طریق C46 خازنی کوپل شده و DC رو نمی‌بینه (فقط برای سیگنال AC) ؛
  *   پس ولتاژ DC پروب از PB0 (قبل از OPAMP) خونده می‌شه. */
@@ -385,7 +399,13 @@ static float ohm_raw(uint8_t r, float *vpin)
     if (v < 0.0f) v = 0.0f;
     *vpin = v;
     if (v >= OHM_VREF * OHM_OPEN_FRACTION) return -1.0f;
-    return k_ohmRanges[r].rref * v / (OHM_VREF - v);
+    const float itot = (OHM_VREF - v) / k_ohmRanges[r].rref;      /* کل جریان از Rref */
+    float ileak = 0.0f;
+    if (OHM_LEAK_I0 > 0.0f) ileak = OHM_LEAK_I0 * ohm_exp((v - OHM_LEAK_V0) / OHM_LEAK_VT);
+    float irx = itot - ileak;                                    /* جریان واقعی توی Rx(+مقاومت سری) */
+    if (irx <= 0.03f * itot || irx <= 1.0e-9f) return -1.0f;     /* عملاً باز / غیرقابل‌اعتماد */
+    float rx = v / irx;
+    return (rx > OHM_MAX_OHM) ? -1.0f : rx;
 }
 
 /* Rx برحسب اهم؛ منفی = OPEN */
@@ -1322,10 +1342,17 @@ __attribute__((unused)) static void App_ScopeOld(void)
 /*  دو سطح ثابت می‌سازیم و همونو رسم می‌کنیم. فرکانس و دیوتی هم از لبه‌ها حساب   */
 /*  می‌شه. برای موج‌های غیر دیجیتال (سینوس و DC) همون رسم خام قبلی می‌مونه.      */
 /* ================================================================== */
-static float s_scV[VM_N];      /* ولت خام */
-static float s_scR[VM_N];      /* موج بازسازی‌شده */
+/* پنجره‌ی ثبت اسکوپ ۳ برابر پنجره‌ی نمایش: ماشه توی بخش اضافه می‌گرده و اضافه‌ها دور ریخته می‌شن */
+#define SC_N          6144U            /* نمونه‌ی ثبت‌شده */
+#define SC_SHOW       2048U            /* نمونه‌ی نمایش‌داده‌شده (۱/۳) */
+#define SC_PERIODS    12.0f            /* AUTO: کل ثبت حدود ۱۲ پریود از سیگنال رو بگیره (۴ تاش نمایش داده می‌شه) */
+#define SC_AUTO_MAX_US 100U
+#define SC_NB         256U             /* تعداد بین‌های هم‌پوشانی پریود */
+static uint16_t s_scBuf[SC_N];
+static float s_scV[SC_N];      /* ولت خام */
+static float s_scR[SC_N];      /* موج بازسازی‌شده */
 
-#define SC_MAXE   256U
+#define SC_MAXE   512U
 #define SC_HYST   0.15f      /* هیسترزیس ±۱۵٪ دامنه دور سطح میانی */
 #define SC_MINW   3U         /* پالس کوتاه‌تر از این (نمونه) = گلیچ و حذف می‌شه */
 
@@ -1338,8 +1365,10 @@ static float sc_med3(float a, float b, float c)
 
 /* v: ولت خام (n نمونه با فاصله‌ی یکنواخت dt) ؛ out: موج دیجیتال تمیز.
  * برمی‌گردونه 0 اگه سیگنال دیجیتال/پریودیک نیست (سینوس، DC، نویز). */
+static float s_scPos[SC_MAXE]; static int8_t s_scDir[SC_MAXE]; static uint32_t s_scNe;
+
 static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
-                          float *hz, float *duty, float *lo, float *hi, uint32_t *first)
+                          float *hz, float *duty, float *lo, float *hi, uint32_t *first, float *r0out)
 {
     /* ۱) حذف spike تک‌نمونه‌ای (median-3) -> out موقتاً نگه‌دارنده‌ی نسخه‌ی تمیز است */
     out[0] = v[0]; out[n - 1U] = v[n - 1U];
@@ -1353,7 +1382,7 @@ static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
     float thH = mid + SC_HYST * span, thL = mid - SC_HYST * span;
 
     /* ۲) Schmitt trigger روی سطح (نه روی شیب) ؛ لبه = عبور از mid با درون‌یابی */
-    float   pos[SC_MAXE]; int8_t dir[SC_MAXE]; uint32_t ne = 0U;
+    float *pos = s_scPos; int8_t *dir = s_scDir; uint32_t ne = 0U;
     uint8_t st = (out[0] > mid) ? 1U : 0U;
     for (uint32_t i = 1U; i < n && ne < SC_MAXE; i++)
     {
@@ -1388,6 +1417,7 @@ static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
         else k++;
     }
     if (ne < 4U) return 0U;
+    s_scNe = ne;
 
     /* ۴) سطح پایین/بالا: میانگین نمونه‌های «داخل» هر پالس (دور از لبه‌ها، بدون overshoot) */
     float lsum = 0.0f, hsum = 0.0f; uint32_t lc = 0U, hc2 = 0U;
@@ -1427,7 +1457,7 @@ static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
             if (m + 1U < ne && dir[m + 1U] < 0) { highT += pos[m + 1U] - pos[m]; hn++; }
         }
     }
-    *hz = 0.0f; *duty = 0.0f;
+    *hz = 0.0f; *duty = 0.0f; *r0out = r0;
     if (rc >= 2U)
     {
         float per = (rl - r0) / (float)(rc - 1U);
@@ -1443,13 +1473,22 @@ static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
     return 1U;
 }
 
+static uint16_t s_scTop[LCD_WIDTH], s_scBot[LCD_WIDTH];
+
+/* فاز کسری 0..1 بدون libm */
+static float sc_frac(float x)
+{
+    float f = x - (float)(int32_t)x;
+    return (f < 0.0f) ? f + 1.0f : f;
+}
+
 static void App_Scope(void)
 {
     LEDs_AllOff();
     UI_Begin("SCOPE");
     UI_Hint("L/R zoom U/D rate OK hold");
-    const uint8_t sineOn = 0U;   /* سینوس DAC حذف شد: وقفه‌ی ۳٫۲kHz نمونه‌برداری رو می‌پروند و روی Probe2 سیگنال اضافه می‌ریخت */
     LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
+    for (uint16_t x = 0U; x < LCD_WIDTH; x++) { s_scTop[x] = 0xFFFFU; s_scBot[x] = 0xFFFFU; }
 
     static const uint16_t k_tbUs[] = { 0U, 2U, 5U, 10U, 20U, 50U, 100U, 200U };
     static const uint8_t  k_zm[]   = { 1U, 2U, 4U, 8U, 16U };
@@ -1471,38 +1510,243 @@ static void App_Scope(void)
 
         uint32_t gapUs = (tb == 0U) ? autoGapUs : (uint32_t)k_tbUs[tb];
         uint32_t gap   = (SystemCoreClock / 1000000U) * gapUs;
-        uint32_t cyc   = Adc_CapturePC4(s_vmBuf, VM_N, gap);
+        uint32_t cyc   = Adc_CapturePC4(s_scBuf, SC_N, gap);
         if (cyc == 0U) continue;
 
         uint32_t mn = 65535U, mx = 0U;
-        for (uint32_t i = 0U; i < VM_N; i++)
+        for (uint32_t i = 0U; i < SC_N; i++)
         {
-            if (s_vmBuf[i] < mn) mn = s_vmBuf[i];
-            if (s_vmBuf[i] > mx) mx = s_vmBuf[i];
-            s_scV[i] = vm_counts_to_vin(s_vmBuf[i]);
+            if (s_scBuf[i] < mn) mn = s_scBuf[i];
+            if (s_scBuf[i] > mx) mx = s_scBuf[i];
+            s_scV[i] = vm_counts_to_vin(s_scBuf[i]);
         }
         float vLo = vm_counts_to_vin(mn), vHi = vm_counts_to_vin(mx);
-        float dtS0 = ((float)cyc / (float)SystemCoreClock) / (float)VM_N;
-        float hzD = 0.0f, dutyD = 0.0f, loD = 0.0f, hiD = 0.0f; uint32_t firstD = 0U;
-        uint8_t dig = sc_digital(s_scV, VM_N, dtS0, s_scR, &hzD, &dutyD, &loD, &hiD, &firstD);
-        const float *dv = dig ? s_scR : s_scV;
+        const float dt = ((float)cyc / (float)SystemCoreClock) / (float)SC_N;
+
+        float hzD = 0.0f, dutyD = 0.0f, loD = 0.0f, hiD = 0.0f, r0 = 0.0f; uint32_t firstD = 0U;
+        s_scNe = 0U;
+        uint8_t dig = sc_digital(s_scV, SC_N, dt, s_scR, &hzD, &dutyD, &loD, &hiD, &firstD, &r0);
         if (dig) { vLo = loD; vHi = hiD; }
         uint8_t sig = ((vHi - vLo) > VM_SIG_SPAN_V) ? 1U : 0U;
 
+        /* ---- بازسازی قفل‌شده روی ماشه (مثل DSO): پریود و عرض پالس = «میانه»ی همه‌ی لبه‌های ثبت‌شده.
+         *      گلیچ و لرزش تک‌لبه اثری ندارن و هر فریم دقیقاً همون موج رو می‌کشه. ---- */
+//        uint8_t  fold = 0U;
+//        float    dutyF = dutyD, jit = 0.0f;
+//        const float *dv = dig ? s_scR : s_scV;
+//        uint32_t start = 0U;
+//        if (dig && sig && hzD > 0.0f)
+//        {
+//            static float per[SC_MAXE / 2U], wid[SC_MAXE / 2U];
+//            uint32_t np = 0U, nw = 0U; float lastR = -1.0f;
+//            for (uint32_t m = 0U; m < s_scNe; m++)
+//            {
+//                if (s_scDir[m] > 0)
+//                {
+//                    if (lastR >= 0.0f && np < SC_MAXE / 2U) per[np++] = s_scPos[m] - lastR;
+//                    lastR = s_scPos[m];
+//                    if (m + 1U < s_scNe && s_scDir[m + 1U] < 0 && nw < SC_MAXE / 2U) wid[nw++] = s_scPos[m + 1U] - s_scPos[m];
+//                }
+//            }
+//            if (np >= 2U && nw >= 2U)
+//            {
+//                for (uint32_t i = 1U; i < np; i++) { float k = per[i]; uint32_t j = i; while (j > 0U && per[j - 1U] > k) { per[j] = per[j - 1U]; j--; } per[j] = k; }
+//                for (uint32_t i = 1U; i < nw; i++) { float k = wid[i]; uint32_t j = i; while (j > 0U && wid[j - 1U] > k) { wid[j] = wid[j - 1U]; j--; } wid[j] = k; }
+//                float P = per[np / 2U], W = wid[nw / 2U];
+//                jit = (per[np - 1U - np / 8U] - per[np / 8U]) / P;                 /* پخش پریودها (۱۰–۹۰٪) */
+//                if (P >= 8.0f && W > 1.0f && W < P && jit < 0.35f)
+//                {
+//                    fold = 1U;
+//                    dutyF = 100.0f * W / P;
+//                    hzD   = 1.0f / (P * dt);
+//                    const float invP = 1.0f / P, dth = W * invP;
+//                    for (uint32_t j = 0U; j < SC_SHOW; j++)
+//                        s_scR[j] = (sc_frac((float)j * invP - 0.04f) < dth + 0.0f && sc_frac((float)j * invP - 0.04f) >= 0.0f) ? hiD : loD;
+//                    dv = s_scR;
+//                    start = 0U;
+//                }
+//            }
+//        }
+
+        /* ---- LOCK پایدار با هیسترزیس ---- */
+        static uint8_t lockState = 0U;
+        static uint8_t goodFrames = 0U;
+        static uint8_t badFrames = 0U;
+
+        static float lockP = 0.0f;
+        static float lockW = 0.0f;
+        static float lockHi = 0.0f;
+        static float lockLo = 0.0f;
+
+        uint8_t fold = 0U;
+        float dutyF = dutyD;
+        float jit = 0.0f;
+        const float *dv = dig ? s_scR : s_scV;
         uint32_t start = 0U;
-        if (sig)
+
+        uint8_t candidate = 0U;
+        float candidateP = 0.0f;
+        float candidateW = 0.0f;
+
+        if (dig && sig && hzD > 0.0f)
         {
-            if (dig) start = firstD;
-            else
+            static float per[SC_MAXE / 2U];
+            static float wid[SC_MAXE / 2U];
+
+            uint32_t np = 0U;
+            uint32_t nw = 0U;
+            float lastR = -1.0f;
+
+            for (uint32_t m = 0U; m < s_scNe; m++)
             {
-                uint32_t mid = (mn + mx) / 2U;
-                for (uint32_t i = 1U; i < VM_TRIG_ZONE; i++)
-                    if (s_vmBuf[i - 1U] < mid && s_vmBuf[i] >= mid) { start = i; break; }
+                if (s_scDir[m] > 0)
+                {
+                    if (lastR >= 0.0f && np < SC_MAXE / 2U)
+                        per[np++] = s_scPos[m] - lastR;
+
+                    lastR = s_scPos[m];
+
+                    if (m + 1U < s_scNe &&
+                        s_scDir[m + 1U] < 0 &&
+                        nw < SC_MAXE / 2U)
+                    {
+                        wid[nw++] = s_scPos[m + 1U] - s_scPos[m];
+                    }
+                }
+            }
+
+            if (np >= 2U && nw >= 2U)
+            {
+                for (uint32_t i = 1U; i < np; i++)
+                {
+                    float k = per[i];
+                    uint32_t j = i;
+
+                    while (j > 0U && per[j - 1U] > k)
+                    {
+                        per[j] = per[j - 1U];
+                        j--;
+                    }
+                    per[j] = k;
+                }
+
+                for (uint32_t i = 1U; i < nw; i++)
+                {
+                    float k = wid[i];
+                    uint32_t j = i;
+
+                    while (j > 0U && wid[j - 1U] > k)
+                    {
+                        wid[j] = wid[j - 1U];
+                        j--;
+                    }
+                    wid[j] = k;
+                }
+
+                float P = per[np / 2U];
+                float W = wid[nw / 2U];
+
+                if (P > 0.0f)
+                    jit = (per[np - 1U - np / 8U] -
+                           per[np / 8U]) / P;
+
+                if (P >= 8.0f &&
+                    W > 1.0f &&
+                    W < P &&
+                    jit < 0.35f)
+                {
+                    candidate = 1U;
+                    candidateP = P;
+                    candidateW = W;
+                }
             }
         }
 
+        /* برای ورود به LOCK سه فریم خوب؛ برای خروج پنج فریم بد */
+        if (candidate)
+        {
+            if (goodFrames < 3U) goodFrames++;
+            badFrames = 0U;
+
+            if (!lockState && goodFrames >= 3U)
+            {
+                lockState = 1U;
+                lockP = candidateP;
+                lockW = candidateW;
+                lockHi = hiD;
+                lockLo = loD;
+            }
+            else if (lockState)
+            {
+                /* هموارسازی تغییرات جزئی پریود و عرض پالس */
+                lockP = lockP * 0.75f + candidateP * 0.25f;
+                lockW = lockW * 0.75f + candidateW * 0.25f;
+
+                lockHi = lockHi * 0.75f + hiD * 0.25f;
+                lockLo = lockLo * 0.75f + loD * 0.25f;
+            }
+        }
+        else
+        {
+            goodFrames = 0U;
+
+            if (badFrames < 5U) badFrames++;
+
+            if (badFrames >= 5U)
+                lockState = 0U;
+        }
+
+        if (lockState && lockP >= 8.0f &&
+            lockW > 1.0f && lockW < lockP)
+        {
+            fold = 1U;
+
+            dutyF = 100.0f * lockW / lockP;
+            hzD = 1.0f / (lockP * dt);
+
+            const float invP = 1.0f / lockP;
+            const float dth = lockW * invP;
+
+            for (uint32_t j = 0U; j < SC_SHOW; j++)
+            {
+                s_scR[j] =
+                    (sc_frac((float)j * invP - 0.04f) < dth &&
+                     sc_frac((float)j * invP - 0.04f) >= 0.0f)
+                    ? lockHi : lockLo;
+            }
+
+            dv = s_scR;
+            start = 0U;
+        }
+//        if (!fold && sig)
+//        {
+//            const float midv = 0.5f * (vLo + vHi);
+//            for (uint32_t i = 1U; i < (SC_N - SC_SHOW); i++)
+//                if (dv[i - 1U] < midv && dv[i] >= midv) { start = i; break; }
+//        }
+
+        if (!fold && sig)
+        {
+            const float midv = 0.5f * (vLo + vHi);
+            uint8_t triggerFound = 0U;
+
+            for (uint32_t i = 1U; i < (SC_N - SC_SHOW); i++)
+            {
+                if (dv[i - 1U] < midv && dv[i] >= midv)
+                {
+                    start = i;
+                    triggerFound = 1U;
+                    break;
+                }
+            }
+
+            /* بدون Trigger معتبر، فریم جدید رسم نشود */
+            if (!triggerFound)
+                continue;
+        }
+
         float    vtop  = vm_pick_scale(vHi);
-        uint32_t nShow = VM_SHOW / (uint32_t)k_zm[zi];
+        uint32_t nShow = SC_SHOW / (uint32_t)k_zm[zi];
         const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
         uint16_t prevY = 0xFFFFU;
 
@@ -1511,8 +1755,8 @@ static void App_Scope(void)
             uint32_t a = start + ((uint32_t)x * nShow) / LCD_WIDTH;
             uint32_t e = start + ((uint32_t)(x + 1U) * nShow) / LCD_WIDTH;
             if (e <= a) e = a + 1U;
-            if (e > VM_N) e = VM_N;
-            if (a >= VM_N) a = VM_N - 1U;
+            if (e > SC_N) e = SC_N;
+            if (a >= SC_N) a = SC_N - 1U;
             float lo = 1.0e9f, hi = -1.0e9f;
             for (uint32_t i = a; i < e; i++)
             {
@@ -1520,8 +1764,10 @@ static void App_Scope(void)
                 if (dv[i] > hi) hi = dv[i];
             }
             float fh = hi / vtop, fl = lo / vtop;
-            if (fh < 0.0f) fh = 0.0f; if (fl < 0.0f) fl = 0.0f;
-            if (fh > 1.0f) fh = 1.0f; if (fl > 1.0f) fl = 1.0f;
+            if (fh < 0.0f) { fh = 0.0f; }
+            if (fl < 0.0f) { fl = 0.0f; }
+            if (fh > 1.0f) { fh = 1.0f; }
+            if (fl > 1.0f) { fl = 1.0f; }
             uint16_t yTop = (uint16_t)(yMax - (uint16_t)(fh * (float)(SCOPE_H - 1U)));
             uint16_t yBot = (uint16_t)(yMax - (uint16_t)(fl * (float)(SCOPE_H - 1U)));
             if (prevY != 0xFFFFU) { if (prevY < yTop) yTop = prevY; if (prevY > yBot) yBot = prevY; }
@@ -1529,41 +1775,59 @@ static void App_Scope(void)
             {   float fy = dv[e - 1U] / vtop; if (fy < 0.0f) fy = 0.0f; if (fy > 1.0f) fy = 1.0f;
                 prevY = (uint16_t)(yMax - (uint16_t)(fy * (float)(SCOPE_H - 1U))); }
             if (prevY < yMin) prevY = yMin;
-            sc_col_bg(x, yMin, yTop);
-            LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
-            sc_col_bg(x, (uint16_t)(yBot + 1U), (uint16_t)(yMax + 1U));
+
+            if (s_scTop[x] == yTop && s_scBot[x] == yBot) continue;     /* ستون عوض نشده = دست نمی‌زنیم (بدون لرزش) */
+            if (s_scTop[x] == 0xFFFFU)
+            {
+                sc_col_bg(x, yMin, yTop);
+                LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
+                sc_col_bg(x, (uint16_t)(yBot + 1U), (uint16_t)(yMax + 1U));
+            }
+            else
+            {
+                uint16_t ot = s_scTop[x], ob = s_scBot[x];
+                if (ot < yTop) sc_col_bg(x, ot, (yTop < (uint16_t)(ob + 1U)) ? yTop : (uint16_t)(ob + 1U));
+                if (ob > yBot) sc_col_bg(x, (yBot + 1U > ot) ? (uint16_t)(yBot + 1U) : ot, (uint16_t)(ob + 1U));
+                LCD_FillRect(x, yTop, 1U, (uint16_t)(yBot - yTop + 1U), UI_OK);
+            }
+            s_scTop[x] = yTop; s_scBot[x] = yBot;
         }
 
         float hz = 0.0f, duty = 0.0f; uint8_t tooFast = 0U;
         uint8_t fok;
-        if (dig && sig && hzD > 0.0f) { hz = hzD; duty = dutyD; fok = 1U; }
-        else fok = sig ? vm_analyze((uint16_t)mn, (uint16_t)mx, cyc, &hz, &duty, &tooFast) : 0U;
+        if (dig && sig && hzD > 0.0f) { hz = hzD; duty = dutyF; fok = 1U; }
+        else if (sig)
+        {
+            for (uint32_t i = 0U; i < VM_N; i++) s_vmBuf[i] = s_scBuf[i];          /* vm_analyze روی ۲۰۴۸ نمونه‌ی اول */
+            fok = vm_analyze((uint16_t)mn, (uint16_t)mx, (uint32_t)(((uint64_t)cyc * VM_N) / SC_N), &hz, &duty, &tooFast);
+        }
+        else fok = 0U;
+
         if (tb == 0U)
         {
             if (!sig) autoGapUs = VM_AUTO_DEF_US;
             else if (fok)
             {
-                float dtS   = ((float)cyc / (float)SystemCoreClock) / (float)VM_N;
-                float baseS = dtS - (float)gapUs * 1.0e-6f;
+                float baseS = dt - (float)gapUs * 1.0e-6f;
                 if (baseS < 1.0e-7f) baseS = 1.0e-7f;
-                float g = (VM_AUTO_PERIODS / (hz * (float)VM_SHOW) - baseS) * 1.0e6f;
+                float g = (SC_PERIODS / (hz * (float)SC_N) - baseS) * 1.0e6f;
                 if (g < 0.0f) g = 0.0f;
-                if (g > (float)VM_AUTO_MAX_US) g = (float)VM_AUTO_MAX_US;
+                if (g > (float)SC_AUTO_MAX_US) g = (float)SC_AUTO_MAX_US;
                 uint32_t gn = (uint32_t)(g + 0.5f);
                 uint32_t df = (gn > autoGapUs) ? (gn - autoGapUs) : (autoGapUs - gn);
-                if (df * 4U > autoGapUs + 2U) autoGapUs = gn;
+                if (df * 2U > autoGapUs + 4U) autoGapUs = gn;   /* فقط با تغییر بیش از ۵۰٪ تایم‌بیس عوض بشه */
             }
             else if (tooFast) autoGapUs = 0U;
-            else { autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > VM_AUTO_MAX_US) autoGapUs = VM_AUTO_MAX_US; }
+            else { autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > SC_AUTO_MAX_US) autoGapUs = SC_AUTO_MAX_US; }
         }
 
         char b[40], t1[12], t2[12], t3[12];
         UI_FmtFixed(t1, sizeof t1, vHi, 1U);
         if (fok) { UI_FmtFixed(t2, sizeof t2, hz / 1000.0f, 2U); UI_FmtFixed(t3, sizeof t3, duty, 0U); }
         else     { snprintf(t2, sizeof t2, "--"); snprintf(t3, sizeof t3, "--"); }
-        snprintf(b, sizeof b, "H%sV %skHz D%s%% %s   ", t1, t2, t3, sineOn ? "S" : "");
+        snprintf(b, sizeof b, "H%sV %skHz D%s%%   ", t1, t2, t3);
         UI_Text(2U, 206U, 1U, UI_DIM, UI_BG, b);
-        snprintf(b, sizeof b, "TB:%s Z:x%u   ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi]);
+        snprintf(b, sizeof b, "TB:%s Z:x%u %s J%u%% e%u  ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", (unsigned)(jit * 100.0f), (unsigned)s_scNe);
         UI_Text(2U, 218U, 1U, UI_DIM, UI_BG, b);
         LED_Blue_Set(sig);
     }
@@ -2303,7 +2567,12 @@ static void App_Logic(void)
     static const uint8_t lvL[8] = { 1,2,2,1,2,2,1,1 };   /* CAN-L: 2.5V با پالس پایین  */
     static const uint8_t lvK[8] = { 0,2,0,0,2,2,0,0 };   /* K-Line: بالا با پالس به GND */
     uint8_t hold[3] = { 0U, 0U, 0U };
+    uint8_t conf[3] = { 0U, 0U, 0U };        /* تأیید تشخیص باس: تک‌گلیچ/جهش موقع وصل‌کردن باس حساب نمی‌شه */
     uint8_t shown[3] = { 2U, 2U, 2U };
+    static uint16_t s_lgTop[LG_W], s_lgBot[LG_W];
+    for (uint16_t i = 0U; i < LG_W; i++) { s_lgTop[i] = 0xFFFFU; s_lgBot[i] = 0xFFFFU; }
+    char prevC[16] = "";
+    int16_t prevBar = -1;
     uint8_t frame = 0U;
     uint32_t last = 0U - 1000U;
 
@@ -2346,11 +2615,13 @@ static void App_Logic(void)
         {
             uint32_t th = mn + ((mx - mn) * 6U) / 10U, tl = mn + ((mx - mn) * 4U) / 10U;
             uint8_t hi = (s_vmBuf[0] >= th) ? 1U : 0U;
+            uint32_t run = 0U;                                   /* لبه فقط وقتی ≥۳ نمونه‌ی پشت‌سرهم اون سمت بمونه (حذف گلیچ تک‌نمونه) */
             for (uint32_t i = 1U; i < VM_N; i++)
             {
                 uint32_t v = s_vmBuf[i];
-                if (!hi && v >= th)      { hi = 1U; edges++; }
-                else if (hi && v <= tl)  { hi = 0U; edges++; }
+                uint8_t opp = hi ? (v <= tl) : (v >= th);
+                if (opp) { if (++run >= 3U) { hi = (uint8_t)!hi; edges++; run = 0U; } }
+                else run = 0U;
             }
         }
         if (sig && edges >= 6U)
@@ -2364,14 +2635,12 @@ static void App_Logic(void)
         int8_t bus = -1;
         for (uint8_t i = 0U; i < 3U; i++)
         {
-            /* قفل: تا وقتی سطح DC با همون باس سازگاره (K-Line بیکار ≈ ولتاژ باتری ،
-               CAN بیکار ≈ 2.5V) اسم باس می‌مونه ؛ فقط وقتی سطح عوض شد کم‌کم پاک می‌شه */
-            uint8_t compat = (i == 2U) ? (vAv >= 6.0f)
-                           : (i == 0U) ? (vAv >= 2.25f && vAv <= 5.5f)
-                                       : (vAv >= 0.3f  && vAv <= 2.75f);
-            if (det[i]) hold[i] = 25U;
-            else if (hold[i] != 0U && !compat) hold[i]--;
-            else if (hold[i] != 0U && hold[i] < 25U) hold[i] = 25U;
+            /* باس وقتی اعلام می‌شه که دو بار پشت‌هم دیده بشه؛ بعد از آخرین دیدن حدود ۳ ثانیه می‌مونه و
+               خودکار پاک می‌شه (حتی اگه ولتاژ DC همون بمونه): ۱۲V ثابت هیچ‌وقت K-LINE نمی‌مونه. */
+            if (det[i]) { if (conf[i] < 6U) conf[i] = (uint8_t)(conf[i] + 2U); }
+            else if (conf[i] != 0U) conf[i]--;
+            if (det[i] && conf[i] >= 4U) hold[i] = 25U;
+            else if (hold[i] != 0U) hold[i]--;
             if (hold[i] != 0U && bus < 0) bus = (int8_t)i;
         }
 
@@ -2391,27 +2660,39 @@ static void App_Logic(void)
         snprintf(b, sizeof b, "%-4s", st);
         UI_Text(4U, 50U, 2U, sc, UI_BG, b);
 
-        /* وسط: اسم باس (زرد) یا ولتاژ (سفید) */
-        LCD_FillRect((uint16_t)(LG_X0 + 1U), 71U, (uint16_t)(LG_W - 2U), 46U, UI_BG);
-        if (bus >= 0)
+        /* وسط: اسم باس (زرد) یا ولتاژ (سفید) ؛ فقط وقتی متن عوض شد دوباره کشیده می‌شه (بدون چشمک) */
         {
-            const char *nm = (bus == 0) ? "CAN-H" : (bus == 1) ? "CAN-L" : "K-LINE";
-            uint16_t w = (uint16_t)(strlen(nm) * 18U);
-            UI_Text((uint16_t)(LG_X0 + (LG_W - w) / 2U), 80U, 3U, UI_TITLE, UI_BG, nm);
-        }
-        else
-        {
-            UI_FmtFixed(t, sizeof t, vAv, 2U);
-            uint16_t w = (uint16_t)(strlen(t) * 24U);
-            UI_Text((uint16_t)(LG_X0 + (LG_W - w) / 2U), 78U, 4U, UI_WHITE, UI_BG, t);
+            char key[16];
+            if (bus >= 0) snprintf(key, sizeof key, "B%d", (int)bus);
+            else { UI_FmtFixed(t, sizeof t, vAv, 2U); snprintf(key, sizeof key, "V%s", t); }
+            if (strcmp(key, prevC) != 0)
+            {
+                strcpy(prevC, key);
+                LCD_FillRect((uint16_t)(LG_X0 + 1U), 71U, (uint16_t)(LG_W - 2U), 46U, UI_BG);
+                if (bus >= 0)
+                {
+                    const char *nm = (bus == 0) ? "CAN-H" : (bus == 1) ? "CAN-L" : "K-LINE";
+                    uint16_t w = (uint16_t)(strlen(nm) * 18U);
+                    UI_Text((uint16_t)(LG_X0 + (LG_W - w) / 2U), 80U, 3U, UI_TITLE, UI_BG, nm);
+                }
+                else
+                {
+                    uint16_t w = (uint16_t)(strlen(t) * 24U);
+                    UI_Text((uint16_t)(LG_X0 + (LG_W - w) / 2U), 78U, 4U, UI_WHITE, UI_BG, t);
+                }
+            }
         }
 
         /* نوار سطح (چپ) */
         {
             float f = vAv / 15.0f; if (f > 1.0f) f = 1.0f;
             uint16_t hh = (uint16_t)(f * 106.0f);
-            LCD_FillRect(5U, 71U, 20U, 108U, UI_BG);
-            if (hh) LCD_FillRect(6U, (uint16_t)(177U - hh), 18U, hh, UI_BAD);
+            if ((int16_t)hh != prevBar)
+            {
+                prevBar = (int16_t)hh;
+                LCD_FillRect(5U, 71U, 20U, 108U, UI_BG);
+                if (hh) LCD_FillRect(6U, (uint16_t)(177U - hh), 18U, hh, UI_BAD);
+            }
         }
 
         /* شکل موج زنده (وسط پایین) */
@@ -2426,7 +2707,6 @@ static void App_Logic(void)
             }
             const uint16_t wx = (uint16_t)(LG_X0 + 2U), ww = (uint16_t)(LG_W - 4U);
             const uint16_t wy = 124U, wh = 54U;
-            LCD_FillRect(wx, wy, ww, wh, UI_BG);
             uint16_t prevY = 0xFFFFU;
             for (uint16_t x = 0U; x < ww; x++)
             {
@@ -2453,7 +2733,16 @@ static void App_Logic(void)
                 }
                 if (yB <= yT) yB = (uint16_t)(yT + 1U);
                 prevY = (uint16_t)(wy + wh - 2U - (uint16_t)(vm_counts_to_vin(s_vmBuf[e - 1U]) / vtop * (float)(wh - 4U)));
+                if (s_lgTop[x] == yT && s_lgBot[x] == yB) continue;           /* ستون عوض نشده = دست نمی‌زنیم */
+                if (s_lgTop[x] != 0xFFFFU)
+                {
+                    uint16_t ot = s_lgTop[x], ob = s_lgBot[x];
+                    if (ot < yT) LCD_FillRect((uint16_t)(wx + x), ot, 1U, (uint16_t)(((yT < ob + 1U) ? yT : (ob + 1U)) - ot), UI_BG);
+                    if (ob > yB) { uint16_t y0 = (yB + 1U > ot) ? (uint16_t)(yB + 1U) : ot; LCD_FillRect((uint16_t)(wx + x), y0, 1U, (uint16_t)(ob + 1U - y0), UI_BG); }
+                }
+                else LCD_FillRect((uint16_t)(wx + x), wy, 1U, wh, UI_BG);
                 LCD_FillRect((uint16_t)(wx + x), yT, 1U, (uint16_t)(yB - yT + 1U), UI_TITLE);
+                s_lgTop[x] = yT; s_lgBot[x] = yB;
             }
         }
 

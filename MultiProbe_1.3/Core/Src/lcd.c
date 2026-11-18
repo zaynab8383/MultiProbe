@@ -1,6 +1,7 @@
 
 #include "main.h"
 #include "lcd.h"
+void UI_NotifyFill(uint16_t x, uint16_t y, uint16_t w, uint16_t h);   /* ui.c ؛ کش ردیف‌های UI رو باطل می‌کنه */
 #include "logo_image_rle.h"
 #include "w25q64.h"
 
@@ -210,6 +211,7 @@ void LCD_Init(void)
 
 void LCD_FillColor(uint16_t rgb565)
 {
+    UI_NotifyFill(0U, 0U, LCD_WIDTH, LCD_HEIGHT);
     const uint8_t high = (uint8_t)(rgb565 >> 8);
     const uint8_t low  = (uint8_t)rgb565;
     uint32_t i;
@@ -228,6 +230,7 @@ void LCD_FillColor(uint16_t rgb565)
 
 void LCD_DrawImage(const uint16_t *image)
 {
+    UI_NotifyFill(0U, 0U, LCD_WIDTH, LCD_HEIGHT);
     uint32_t i;
 
     if (image == NULL)
@@ -463,6 +466,7 @@ void LCD_InitAndShowImage(void)
 
 void LCD_FillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
 {
+    UI_NotifyFill(x, y, w, h);
     if (x >= LCD_WIDTH || y >= LCD_HEIGHT) return;
     if ((uint32_t)x + w > LCD_WIDTH)  w = (uint16_t)(LCD_WIDTH  - x);
     if ((uint32_t)y + h > LCD_HEIGHT) h = (uint16_t)(LCD_HEIGHT - y);
@@ -627,6 +631,7 @@ void LCD_DrawChar(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint
 
 void LCD_DrawString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t bg, uint8_t scale)
 {
+    UI_NotifyFill(x, y, (uint16_t)(LCD_WIDTH - x), 20U);
     uint16_t cx = x;
     uint16_t step = (uint16_t)(FONT_W * scale);
     while (*s)
@@ -641,6 +646,7 @@ void LCD_DrawString(uint16_t x, uint16_t y, const char *s, uint16_t fg, uint16_t
 void LCD_DrawBitmap1bpp(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                         const uint8_t *bits, uint16_t fg, uint16_t bg)
 {
+    UI_NotifyFill(x, y, w, h);
     if (w == 0U || h == 0U) return;
     if ((uint32_t)x + w > LCD_WIDTH || (uint32_t)y + h > LCD_HEIGHT) return;
 
@@ -676,6 +682,7 @@ void LCD_DrawBitmap1bpp(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 void LCD_DrawRLE4(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                   const uint8_t *rle, uint16_t len, const uint16_t *pal)
 {
+    UI_NotifyFill(x, y, w, h);
     if (w == 0U || h == 0U) return;
     if ((uint32_t)x + w > LCD_WIDTH || (uint32_t)y + h > LCD_HEIGHT) return;
 

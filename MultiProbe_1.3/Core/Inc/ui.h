@@ -34,6 +34,7 @@ const UiTheme_t *UI_ThemeOf(uint8_t idx);
 void        UI_Begin(const char *title);                 /* زیر نوار وضعیت رو پاک می‌کنه و عنوان رنگی می‌ذاره */
 MenuInput_t UI_Poll(void);                               /* کی‌پد + نوار وضعیت */
 void        UI_Text(uint16_t x, uint16_t y, uint8_t scale, uint16_t fg, uint16_t bg, const char *s);
+void        UI_NotifyFill(uint16_t x, uint16_t y, uint16_t w, uint16_t h);   /* کش ردیف‌ها رو باطل می‌کنه (از LCD_FillRect صدا زده می‌شه) */
 void        UI_Row(uint8_t row, uint16_t fg, uint16_t bg, const char *s);   /* ردیف‌های scale=2 با فاصله‌ی ۲۰ پیکسل */
 void        UI_Hint(const char *s);                      /* خط راهنمای پایین صفحه */
 void        UI_FmtFixed(char *dst, size_t n, float v, uint8_t decimals);

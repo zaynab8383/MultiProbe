@@ -18,7 +18,7 @@ extern OPAMP_HandleTypeDef hopamp1;
  * اندازه‌گیری روی برد: ورودی 12V با ضریب 11 حدود 9V نشون می‌داد  =>  11 × 12 / 9 = 14.67
  * اگه عدد روی نوار بالا با مولتی‌متر فرق داشت، فقط همین عدد رو درست کن
  * (یا موقتاً با بالا/پایین توی صفحه‌ی اصلی؛ اون با ریست از بین می‌ره). */
-#define SUPPLY_DIVIDER 14.67f
+#define SUPPLY_DIVIDER 14.01f
 static float s_supplyScale = SUPPLY_DIVIDER;   /* با دکمه‌های بالا/پایین توی صفحه‌ی اصلی قابل تنظیمه */
 
 static uint32_t read_raw(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling)
@@ -123,7 +123,7 @@ float Adc_GetVin(void)
  *   - شروع هر نمونه روی یک شبکه‌ی ثابت DWT->CYCCNT قفل است (t0 + k*step) نه «بعد از نمونه‌ی قبل»
  *   - اگه کل بازه کوتاه (<= ~10ms) باشه وقفه‌ها حین نمونه‌برداری مسدود می‌شن
  * ------------------------------------------------------------------------------------------------ */
-#define CAP_IRQ_MASK_MAX_MS  10U       /* بیشتر از این وقفه‌ها رو مسدود نمی‌کنیم (SysTick/USB) */
+#define CAP_IRQ_MASK_MAX_MS  20U       /* بیشتر از این وقفه‌ها رو مسدود نمی‌کنیم (SysTick/USB) */
 
 __attribute__((section(".RamFunc"), noinline, optimize("O2")))
 static uint32_t adc_burst_ram(ADC_TypeDef *a, uint16_t *dst, uint32_t n, uint32_t step, uint32_t mask_irq)

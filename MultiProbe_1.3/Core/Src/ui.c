@@ -85,14 +85,45 @@ void UI_Text(uint16_t x, uint16_t y, uint8_t scale, uint16_t fg, uint16_t bg, co
     while (i < cols && s[i] != '\0') { buf[i] = s[i]; i++; }
     while (i < cols) buf[i++] = ' ';                 /* بقیه‌ی خط رو با پس‌زمینه پر کن */
     buf[i] = '\0';
+    UI_NotifyFill(x, y, (uint16_t)(cols * FONT_CELL_W * scale), (uint16_t)(FONT_CELL_H * scale));
     LCD_DrawString(x, y, buf, fg, bg, scale);
+}
+
+/* کش ردیف‌ها: اگه متن/رنگ ردیف عوض نشده، دوباره نمی‌کشیمش (FillRect + متن = چشمک).
+ * هر نقاشی دیگه‌ای که روی ناحیه‌ی ردیف بیفته (LCD_FillRect / UI_Text) کش اون ردیف رو باطل می‌کنه. */
+#define ROWC_N   12U
+#define ROWC_LEN 34U
+static struct { uint16_t fg, bg; uint8_t valid; char s[ROWC_LEN]; } s_rowc[ROWC_N];
+static uint8_t s_inRow = 0U;
+
+void UI_NotifyFill(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
+{
+    (void)x; (void)w;
+    if (s_inRow) return;
+    uint32_t y1 = (uint32_t)y + h;
+    for (uint8_t r = 0U; r < ROWC_N; r++)
+    {
+        uint32_t ry = ROW_Y0 + (uint32_t)r * ROW_PITCH;
+        if (s_rowc[r].valid && y < ry + ROW_PITCH && y1 > ry) s_rowc[r].valid = 0U;
+    }
 }
 
 void UI_Row(uint8_t row, uint16_t fg, uint16_t bg, const char *s)
 {
     uint16_t y = (uint16_t)(ROW_Y0 + (uint16_t)row * ROW_PITCH);
+    if (row < ROWC_N && s_rowc[row].valid && s_rowc[row].fg == fg && s_rowc[row].bg == bg &&
+        strncmp(s_rowc[row].s, s, ROWC_LEN - 1U) == 0 && strlen(s) < ROWC_LEN)
+        return;                                       /* بدون تغییر */
+    s_inRow = 1U;
     LCD_FillRect(0U, y, LCD_WIDTH, ROW_PITCH, bg);
     UI_Text(4U, (uint16_t)(y + 1U), 2U, fg, bg, s);
+    s_inRow = 0U;
+    if (row < ROWC_N)
+    {
+        s_rowc[row].fg = fg; s_rowc[row].bg = bg; s_rowc[row].valid = 1U;
+        strncpy(s_rowc[row].s, s, ROWC_LEN - 1U); s_rowc[row].s[ROWC_LEN - 1U] = '\0';
+        if (strlen(s) >= ROWC_LEN) s_rowc[row].valid = 0U;
+    }
 }
 
 void UI_Hint(const char *s)
