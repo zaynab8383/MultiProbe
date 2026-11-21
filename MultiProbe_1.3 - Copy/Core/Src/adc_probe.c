@@ -161,12 +161,12 @@ static uint32_t adc_burst_ram(ADC_TypeDef *a, uint16_t *dst, uint32_t n, uint32_
     return step;                                    /* گام واقعی (سیکل CPU) */
 }
 
-uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
+static uint32_t adc_capture(uint32_t channel, uint32_t sampling, uint16_t *dst, uint32_t n, uint32_t gap_cycles)
 {
     ADC_ChannelConfTypeDef cfg = {0};
-    cfg.Channel      = ADC_CHANNEL_4;
+    cfg.Channel      = channel;
     cfg.Rank         = ADC_REGULAR_RANK_1;
-    cfg.SamplingTime = ADC_SAMPLETIME_8CYCLES_5;
+    cfg.SamplingTime = sampling;
     cfg.SingleDiff   = ADC_SINGLE_ENDED;
     cfg.OffsetNumber = ADC_OFFSET_NONE;
     if (HAL_ADC_ConfigChannel(&hadc1, &cfg) != HAL_OK) return 0U;
@@ -184,6 +184,22 @@ uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
     (void)HAL_ADC_Stop(&hadc1);
     if (stepEff == 0U) return 0U;
     return stepEff * n;                              /* کل سیکل‌ها: dt = برگشتی / n دقیقاً یکنواخته */
+}
+
+/* خروجی OPAMP1 (PC4): همه‌ی صفحات قدیمی */
+uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
+{
+    return adc_capture(ADC_CHANNEL_4, ADC_SAMPLETIME_8CYCLES_5, dst, n, gap_cycles);
+}
+
+/* خود گره‌ی تقسیم‌کننده‌ی پروب ۱ (PB0 = ADC1_IN9) ، قبل از OPAMP.
+ * چرا؟ خروجی OPAMP داخلی (PC4) خازن 100nF (C1) رو می‌رونه و نمی‌تونه سریع بالا/پایین بره:
+ * شیب بالارونده‌ی کند و افت تیز -> هر موجی (مربع، سینوسی، مثلثی...) شبیه دندانه‌اره می‌شد. PB0 خودش منبع کم‌ظرفیتی نیست
+ * ولی خازن C4=220pF سر راهش مثل مخزن شارژ عمل می‌کنه و ظرفیت نمونه‌بردار ADC (~4pF) رو بدون افت شارژ می‌کنه؛
+ * با زمان نمونه‌برداری 16.5 سیکل خطای شارژ‌شیرینگ کمتر از ~۲٪ و بدون حافظه‌ی قابل‌توجه می‌مونه. */
+uint32_t Adc_CapturePB0(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
+{
+    return adc_capture(ADC_CHANNEL_9, ADC_SAMPLETIME_16CYCLES_5, dst, n, gap_cycles);
 }
 
 float Adc_GetPB1(void) { return (to_volt(read_raw(&hadc1, ADC_CHANNEL_5,  ADC_SAMPLETIME_64CYCLES_5)) - BIAS_PB1) * RATIO_PB1; }

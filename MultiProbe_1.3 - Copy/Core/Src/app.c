@@ -45,7 +45,27 @@ static void beep_ms(uint32_t ms)
 #define VM_GRID       0x31A6U
 #define VM_TRACE      0xFFE0U                  /* خط زرد مثل ویدیو */
 #define VM_SIG_SPAN_V 0.8f                     /* اختلاف Hi-Lo بیشتر از این = سیگنال */
+/* --- بالای فایل، کنار بقیه‌ی static های اهم‌متر --- */
+#define OHM_FILT_N 5U
+static float   s_ohmHist[OHM_FILT_N];
+static uint8_t s_ohmHistCount  = 0U;
+static uint8_t s_ohmHistPos    = 0U;
+static uint8_t s_ohmWasOpen    = 1U;
+static uint8_t s_ohmLastRange  = 0xFFU;
 
+static float ohm_median(const float *a, uint8_t n)
+{
+    float tmp[OHM_FILT_N];
+    for (uint8_t i = 0U; i < n; i++) tmp[i] = a[i];
+    for (uint8_t i = 1U; i < n; i++)
+    {
+        float key = tmp[i];
+        int8_t j = (int8_t)i - 1;
+        while (j >= 0 && tmp[j] > key) { tmp[j + 1] = tmp[j]; j--; }
+        tmp[j + 1] = key;
+    }
+    return tmp[n / 2U];
+}
 static uint16_t s_vmBuf[VM_N];
 
 static float vm_counts_to_vin(uint32_t c)
@@ -374,18 +394,25 @@ static const OhmRange_t k_ohmRanges[OHM_RANGES] = OHM_RANGE_TABLE;
 /* مقاومت سری مسیر Probe2 -> GND (R35 + بافر)؛ از هر اندازه‌گیری کم می‌شه */
 static float s_ohmSeries = OHM_SERIES_DEFAULT;
 
-/* exp بدون libm (دقت ~۰٫۱٪ برای |x|<20) */
-static float ohm_exp(float x)
+/* نشتی نود Probe1 (uA) به‌صورت تابعی از ولتاژ نود: درون‌یابی خطی روی جدول board_map.h */
+typedef struct { float v; float ua; } OhmLeak_t;
+static const OhmLeak_t k_ohmLeak[OHM_LEAK_POINTS] = OHM_LEAK_TABLE;
+static float s_ohmLeakUA = 0.0f;                   /* آخرین نشتی اعمال‌شده (برای نمایش) */
+
+static float ohm_leak_ua(float v)
 {
-    if (x > 20.0f) x = 20.0f;
-    if (x < -20.0f) x = -20.0f;
-    float y = x * 1.4426950f;                       /* 2^y */
-    int32_t n = (int32_t)(y + (y >= 0.0f ? 0.5f : -0.5f));
-    float f = y - (float)n;                         /* |f| <= 0.5 */
-    float p = 1.0f + f * (0.6931472f + f * (0.2402265f + f * (0.0555041f + f * 0.0096181f)));
-    while (n > 0) { p *= 2.0f; n--; }
-    while (n < 0) { p *= 0.5f; n++; }
-    return p;
+    if (v <= k_ohmLeak[0].v) return k_ohmLeak[0].ua;
+    for (uint8_t i = 1U; i < OHM_LEAK_POINTS; i++)
+    {
+        if (v <= k_ohmLeak[i].v)
+        {
+            float f = (v - k_ohmLeak[i - 1U].v) / (k_ohmLeak[i].v - k_ohmLeak[i - 1U].v);
+            return k_ohmLeak[i - 1U].ua + f * (k_ohmLeak[i].ua - k_ohmLeak[i - 1U].ua);
+        }
+    }
+    /* بالاتر از آخرین نقطه: با شیب آخر ادامه بده */
+    const OhmLeak_t *p = &k_ohmLeak[OHM_LEAK_POINTS - 2U], *q = &k_ohmLeak[OHM_LEAK_POINTS - 1U];
+    return q->ua + (v - q->v) * (q->ua - p->ua) / (q->v - p->v);
 }
 
 /* Rx (قبل از کم‌کردن مقاومت سری) برحسب اهم؛ منفی = OPEN. vpin = ولتاژ واقعی Probe1.
@@ -394,14 +421,14 @@ static float ohm_exp(float x)
 static float ohm_raw(uint8_t r, float *vpin)
 {
     Probe_OhmSelect(r);                             /* Probe2 = 0V ، پول‌آپ 3.3V با Rref روی Probe1 */
-    HAL_Delay(8);                                   /* صبر برای نشستن سوئیچ‌ها */
+    HAL_Delay(15);                                   /* صبر برای نشستن سوئیچ‌ها */
     float v = Adc_GetProbe1Dc();
     if (v < 0.0f) v = 0.0f;
     *vpin = v;
     if (v >= OHM_VREF * OHM_OPEN_FRACTION) return -1.0f;
     const float itot = (OHM_VREF - v) / k_ohmRanges[r].rref;      /* کل جریان از Rref */
-    float ileak = 0.0f;
-    if (OHM_LEAK_I0 > 0.0f) ileak = OHM_LEAK_I0 * ohm_exp((v - OHM_LEAK_V0) / OHM_LEAK_VT);
+    const float ileak = ohm_leak_ua(v) * 1.0e-6f;                 /* نشتی زنر در این ولتاژ نود */
+    s_ohmLeakUA = ileak * 1.0e6f;
     float irx = itot - ileak;                                    /* جریان واقعی توی Rx(+مقاومت سری) */
     if (irx <= 0.03f * itot || irx <= 1.0e-9f) return -1.0f;     /* عملاً باز / غیرقابل‌اعتماد */
     float rx = v / irx;
@@ -422,7 +449,7 @@ static void fmt_ohm(char *dst, size_t n, float r)
     char t[16];
     if (r < 0.0f)            { snprintf(dst, n, "OPEN"); }
     else if (r < 1000.0f)    { UI_FmtFixed(t, sizeof t, r, 1);           snprintf(dst, n, "%s ohm", t); }
-    else if (r < 1.0e6f)     { UI_FmtFixed(t, sizeof t, r / 1000.0f, 2); snprintf(dst, n, "%s k", t); }
+    else if (r < 1.0e6f)     { UI_FmtFixed(t, sizeof t, r / 1000.0f, 2); snprintf(dst, n, "%s%s k", (r > OHM_RELIABLE_MAX) ? "~" : "", t); }
     else                     { UI_FmtFixed(t, sizeof t, r / 1.0e6f, 2);  snprintf(dst, n, "%s M", t); }
 }
 
@@ -460,24 +487,31 @@ static void App_Ohmmeter(void)
         if (!TICK_DUE(last, 300U)) continue;
         last = HAL_GetTick();
 
-        uint8_t r = (mode == 0U) ? 0U : (uint8_t)(mode - 1U);
+        uint8_t r = (mode == 0U) ? ((s_ohmLastRange < OHM_RANGES) ? s_ohmLastRange : (uint8_t)(OHM_RANGES - 1U)) : (uint8_t)(mode - 1U);
         float vp, rx = ohm_measure(r, &vp);
 
         if (mode == 0U)
         {
-            /* رنجی رو انتخاب کن که Rref ش به Rx نزدیک‌تره (بهترین دقت) */
-            uint8_t best = (rx < 0.0f) ? (uint8_t)(OHM_RANGES - 1U) : r;
-            if (rx >= 0.0f)
+            /* AUTO: از رنج بالا (۱۰k) شروع می‌شه (ولتاژ نود کمتر = نشتی زنر کمتر = دقت بیشتر) و فقط برای
+             * مقاومت‌های کوچیک می‌ره رنج ۱k. هیسترزیس: وقتی روی ۱k هستیم تا ۱٫۲×آستانه همون‌جا می‌مونیم. */
+            const float thr = (s_ohmLastRange == 0U) ? OHM_AUTO_LOW_OHM * 1.2f : OHM_AUTO_LOW_OHM;
+            if (r > 0U && rx >= 0.0f && rx < thr) { r = 0U; rx = ohm_measure(r, &vp); }
+            else if (r == 0U && (rx < 0.0f || rx >= thr)) { r = (uint8_t)(OHM_RANGES - 1U); rx = ohm_measure(r, &vp); }
+            uint8_t isOpenNow = (rx < 0.0f);
+            if (isOpenNow != s_ohmWasOpen || r != s_ohmLastRange)
             {
-                float bs = 1.0e30f;
-                for (uint8_t k = 0U; k < OHM_RANGES; k++)
-                {
-                    float q = (rx > 1.0f) ? rx / k_ohmRanges[k].rref : 1.0f / k_ohmRanges[k].rref;
-                    if (q < 1.0f) q = 1.0f / q;
-                    if (q < bs) { bs = q; best = k; }
-                }
+                s_ohmHistCount = 0U;
+                s_ohmHistPos   = 0U;
+                s_ohmWasOpen   = isOpenNow;
+                s_ohmLastRange = r;
             }
-            if (best != r) { r = best; rx = ohm_measure(r, &vp); }
+            if (!isOpenNow)
+            {
+                s_ohmHist[s_ohmHistPos] = rx;
+                s_ohmHistPos = (uint8_t)((s_ohmHistPos + 1U) % OHM_FILT_N);
+                if (s_ohmHistCount < OHM_FILT_N) s_ohmHistCount++;
+                rx = ohm_median(s_ohmHist, s_ohmHistCount);
+            }
         }
 
         char b[32], t[16];
@@ -494,7 +528,8 @@ static void App_Ohmmeter(void)
         UI_FmtFixed(t, sizeof t, Adc_ReadPinVolts(&hadc1, ADC_CHANNEL_3), 3);   /* PA6 = Probe2 ، باید ~0 باشه */
         snprintf(b, sizeof b, "P2 pin %s V", t);
         UI_Row(6U, UI_ORANGE, UI_BG, b);
-        snprintf(b, sizeof b, "SEL active %s", Probe_SwActiveHigh() ? "HIGH" : "LOW");
+        { char tl[12]; UI_FmtFixed(tl, sizeof tl, s_ohmLeakUA, 1);
+          snprintf(b, sizeof b, "Leak %s uA", tl); }                 /* نشتی زنر که از جریان کم شده (برای کالیبراسیون جدول) */
         UI_Row(2U, UI_DIM, UI_BG, b);
         if (HAL_GetTick() < zmsgUntil)
         {
@@ -1350,7 +1385,113 @@ __attribute__((unused)) static void App_ScopeOld(void)
 #define SC_NB         256U             /* تعداد بین‌های هم‌پوشانی پریود */
 static uint16_t s_scBuf[SC_N];
 static float s_scV[SC_N];      /* ولت خام */
-static float s_scR[SC_N];      /* موج بازسازی‌شده */
+static float s_scR[SC_N];      /* موج بازسازی‌شده (فقط برای اندازه‌گیری؛ نمایش داده نمی‌شه) */
+static float s_scC[SC_N];
+/* PB0 کف ۰٫۰۹۵ولتی PC4 رو نداره؛ فقط ضریب تقسیم خطی. */
+static float sc_counts_to_vin(uint32_t c) { return Adc_PinToVinLinear((float)c * 3.3f / 65535.0f); }      /* ولت بعد از جبران RC ورودی = چیزی که روی صفحه رسم می‌شه */
+
+/* ---------------------------------------------------------------------------------------------------
+ * جبران خودکار ورودی پروب ۱
+ *
+ * مشاهده روی برد: لبه‌ی بالارونده‌ی موج مربعی کامل می‌آد (خیلی بزرگ‌تر از سطح واقعی)، بعدش سقف مثل یه خازن در حال خالی‌شدن
+ * افت نمایی می‌کنه و پایین موج هم کلیپ می‌شه. یعنی ورودی مثل «تقسیم‌کننده‌ی جبران‌شده‌ی بیش‌ازحد» رفتار می‌کنه:
+ *     H(s) = (1 + s·ta) / (1 + s·tb)      ، بهره‌ی HF / بهره‌ی DC = rho = ta/tb  ،  tb = ثابت زمانی افت
+ * همین رو با فیلتر معکوسش خنثی می‌کنیم (پایدار، و نویز HF رو کم می‌کنه):
+ *     ta·dy/dt + y = x + tb·dx/dt          (x = سیگنال اندازه‌گیری‌شده با ضریب DC ، y = سیگنال واقعی)
+ * rho و tb خودشون از روی «سقف» پالس‌های مربعی ثبت‌شده یاد گرفته می‌شن (فیت U + W·exp(-t/tb)). اگه سقف صافِ صاف بود
+ * (سخت‌افزار درست شده) rho به ۱ می‌رسه و جبران خودش خاموش می‌شه.
+ * پایین موج روی GND کلیپ می‌شه (کلمپ ورودی) ؛ هر جا نمونه ≈ ۰ بود حالت فیلتر ریست و خروجی ۰ در نظر گرفته می‌شه.
+ * محدودیت: موج‌های سینوسی/مثلثی که به زیر ۰ می‌رن فقط تقریبی درست می‌شن (اطلاعات کلیپ‌شده برنمی‌گرده).
+ * --------------------------------------------------------------------------------------------------- */
+#define SC_CMP_RHO0      10.0f        /* مقدار اولیه‌ی rho قبل از یادگیری */
+#define SC_CMP_TAU0      0.0005f      /* مقدار اولیه‌ی tb (ثانیه) */
+#define SC_CMP_CLIP_V    0.15f        /* زیر این ولت (مقیاس ورودی) = کلیپ‌شده‌ی صفر */
+static float s_cmpRho = SC_CMP_RHO0;
+static float s_cmpTau = SC_CMP_TAU0;
+
+/* یادگیری rho/tb از سقف پالس‌ها ؛ خروجی 1 = چیزی یاد گرفته شد */
+static uint8_t sc_cmp_learn(const float *v, uint32_t n, float dt)
+{
+    float mn = v[0], mx = v[0];
+    for (uint32_t i = 1U; i < n; i++) { if (v[i] < mn) mn = v[i]; if (v[i] > mx) mx = v[i]; }
+    const float span = mx - mn;
+    if (span < 1.0f || dt <= 0.0f) return 0U;
+
+    float accRho = 0.0f, accTau = 0.0f; uint32_t cnt = 0U;
+
+    uint32_t i = 4U;
+    while (i + 8U < n)
+    {
+        if ((v[i] - v[i - 4U]) <= 0.35f * span) { i++; continue; }
+        /* لبه‌ی بالارونده: صبر کن تا شیب بخوابه */
+        uint32_t k = i;
+        while (k + 1U < n && (v[k] - v[k - 1U]) > 0.02f * span) k++;
+        uint32_t p0 = k + 2U;
+        /* انتهای سقف: اولین افت بزرگ */
+        uint32_t j = p0 + 4U;
+        while (j < n && (v[j - 4U] - v[j]) <= 0.12f * span) j++;
+        if (j >= n) break;                                   /* سقف تا آخر بافر کامل نیست */
+        uint32_t p1 = j - 4U;
+        i = j + 4U;
+        if (p1 <= p0 + 40U) continue;
+        const uint32_t M = p1 - p0;
+        const float L = (float)M * dt;
+        if (L < 250e-6f) continue;                           /* سقف خیلی کوتاه: قابل اطمینان نیست */
+
+        float Ss = 0.0f, Ss2 = 0.0f;
+        for (uint32_t m = 0U; m < M; m++) { float x = v[p0 + m]; Ss += x; Ss2 += x * x; }
+        float bestSse = 1.0e30f, bU = 0.0f, bW = 0.0f, bTau = 0.0f;
+        float tau = 40.0e-6f;
+        for (uint32_t g = 0U; g < 44U; g++, tau *= 1.12f)       /* شبکه‌ی هندسی 40us .. ~5ms با گام ۱۲٪ */
+        {
+            if (tau > 3.0f * L) break;
+            const float q = expf(-dt / tau);
+            float e = 1.0f, Se = 0.0f, Se2 = 0.0f, Ses = 0.0f;
+            for (uint32_t m = 0U; m < M; m++) { Se += e; Se2 += e * e; Ses += e * v[p0 + m]; e *= q; }
+            /* مجموع e^0..e^(M-1)=Se ؛ نرمال‌ایکویشن 2×2 برای [U, W] */
+            const float Mf = (float)M;
+            float det = Mf * Se2 - Se * Se;
+            if (det < 1.0e-6f) continue;
+            float U = (Ss * Se2 - Se * Ses) / det;
+            float W = (Mf * Ses - Se * Ss) / det;
+            float sse = Ss2 - U * Ss - W * Ses;
+            if (sse < bestSse) { bestSse = sse; bU = U; bW = W; bTau = tau; }
+        }
+        if (bTau <= 0.0f || bU <= 0.2f) continue;
+        const float rms = sqrtf(fmaxf(bestSse, 0.0f) / (float)M);
+        if (rms > 0.05f * (bU + bW)) continue;               /* فیت قابل اعتماد نیست (سقف نمایی نیست) */
+        float rho = (bU + bW) / bU;
+        if (rho < 1.05f) { accRho += 1.0f; accTau += s_cmpTau; cnt++; continue; }   /* سقف صاف = بدون اعوجاج */
+        if (rho > 40.0f || bW < 0.0f) continue;
+        accRho += rho; accTau += bTau; cnt++;
+    }
+    if (cnt == 0U) return 0U;
+    const float r = accRho / (float)cnt, t = accTau / (float)cnt;
+    s_cmpRho += 0.35f * (r - s_cmpRho);
+    s_cmpTau += 0.35f * (t - s_cmpTau);
+    if (s_cmpRho < 1.0f) s_cmpRho = 1.0f;
+    if (s_cmpRho > 30.0f) s_cmpRho = 30.0f;
+    return 1U;
+}
+
+/* فیلتر معکوس + ریست روی کلیپ صفر */
+static void sc_cmp_apply(const float *in, float *out, uint32_t n, float dt)
+{
+    if (s_cmpRho < 1.15f || dt <= 0.0f) { for (uint32_t i = 0U; i < n; i++) out[i] = in[i]; return; }
+    const float tb = s_cmpTau, ta = s_cmpRho * s_cmpTau;
+    const float a = dt / (ta + dt), b = tb / (ta + dt);
+    float y = (in[0] > SC_CMP_CLIP_V) ? in[0] : 0.0f, xp = in[0];
+    out[0] = y;
+    for (uint32_t i = 1U; i < n; i++)
+    {
+        const float x = in[i];
+        if (x <= SC_CMP_CLIP_V) { y = 0.0f; }
+        else { y = y + (x - y) * a + b * (x - xp); }
+        if (y < 0.0f) y = 0.0f;
+        xp = x;
+        out[i] = y;
+    }
+}
 
 #define SC_MAXE   512U
 #define SC_HYST   0.15f      /* هیسترزیس ±۱۵٪ دامنه دور سطح میانی */
@@ -1486,7 +1627,7 @@ static void App_Scope(void)
 {
     LEDs_AllOff();
     UI_Begin("SCOPE");
-    UI_Hint("L/R zoom U/D rate OK hold");
+    UI_Hint("L/R zoom U/D rate OK hold L:src");
     LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
     for (uint16_t x = 0U; x < LCD_WIDTH; x++) { s_scTop[x] = 0xFFFFU; s_scBot[x] = 0xFFFFU; }
 
@@ -1495,6 +1636,8 @@ static void App_Scope(void)
     uint8_t  tb = 0U, zi = 0U, hold = 0U;
     uint32_t autoGapUs = VM_AUTO_DEF_US;
     uint32_t last = 0U - 1000U;
+    uint8_t  autoFail = 0U;
+    uint8_t  src = 1U;        /* 1 = خروجی OPAMP (PC4 ، کم‌نویز) ، 0 = مستقیم از PB0 ؛ با چپ در زوم x1 عوض می‌شه */
 
     for (;;)
     {
@@ -1502,6 +1645,7 @@ static void App_Scope(void)
         if (in == MENU_INPUT_BACK) break;
         if (in == MENU_INPUT_RIGHT && zi + 1U < sizeof(k_zm)) { zi++; last = 0U - 1000U; }
         if (in == MENU_INPUT_LEFT  && zi > 0U)                { zi--; last = 0U - 1000U; }
+        else if (in == MENU_INPUT_LEFT)                       { src = (uint8_t)!src; last = 0U - 1000U; }
         if (in == MENU_INPUT_UP   && tb + 1U < (sizeof(k_tbUs) / sizeof(k_tbUs[0]))) { tb++; last = 0U - 1000U; }
         if (in == MENU_INPUT_DOWN && tb > 0U)                 { tb--; last = 0U - 1000U; }
         if (in == MENU_INPUT_SELECT) hold = (uint8_t)!hold;
@@ -1510,7 +1654,7 @@ static void App_Scope(void)
 
         uint32_t gapUs = (tb == 0U) ? autoGapUs : (uint32_t)k_tbUs[tb];
         uint32_t gap   = (SystemCoreClock / 1000000U) * gapUs;
-        uint32_t cyc   = Adc_CapturePC4(s_scBuf, SC_N, gap);
+        uint32_t cyc   = src ? Adc_CapturePC4(s_scBuf, SC_N, gap) : Adc_CapturePB0(s_scBuf, SC_N, gap);
         if (cyc == 0U) continue;
 
         uint32_t mn = 65535U, mx = 0U;
@@ -1518,15 +1662,25 @@ static void App_Scope(void)
         {
             if (s_scBuf[i] < mn) mn = s_scBuf[i];
             if (s_scBuf[i] > mx) mx = s_scBuf[i];
-            s_scV[i] = vm_counts_to_vin(s_scBuf[i]);
+            s_scV[i] = src ? vm_counts_to_vin(s_scBuf[i]) : sc_counts_to_vin(s_scBuf[i]);
         }
-        float vLo = vm_counts_to_vin(mn), vHi = vm_counts_to_vin(mx);
+        float vLo = src ? vm_counts_to_vin(mn) : sc_counts_to_vin(mn), vHi = src ? vm_counts_to_vin(mx) : sc_counts_to_vin(mx);
         const float dt = ((float)cyc / (float)SystemCoreClock) / (float)SC_N;
+
+        /* جبران فیلتر RC ورودی (s_scR موقتاً بافر میانگین‌گیری) ؛ بعدش همه‌چیز (اندازه‌گیری و رسم) روی داده‌ی جبران‌شده */
+        /* ۱) لبه‌های خام -> یادگیری rho/tb از سقف پالس‌ها ؛ ۲) فیلتر معکوس */
+        (void)sc_cmp_learn(s_scV, SC_N, dt);
+        sc_cmp_apply(s_scV, s_scC, SC_N, dt);
+        float cLo = 1.0e9f, cHi = -1.0e9f;
+        for (uint32_t i = 0U; i < SC_N; i++) { if (s_scC[i] < cLo) cLo = s_scC[i]; if (s_scC[i] > cHi) cHi = s_scC[i]; }
+        if (cLo < 0.0f) cLo = 0.0f;
+        const float dispHi = cHi;                       /* مقیاس رسم = بیشینه‌ی واقعی موج (نه سطح میانگین‌شده) */
 
         float hzD = 0.0f, dutyD = 0.0f, loD = 0.0f, hiD = 0.0f, r0 = 0.0f; uint32_t firstD = 0U;
         s_scNe = 0U;
-        uint8_t dig = sc_digital(s_scV, SC_N, dt, s_scR, &hzD, &dutyD, &loD, &hiD, &firstD, &r0);
+        uint8_t dig = sc_digital(s_scC, SC_N, dt, s_scR, &hzD, &dutyD, &loD, &hiD, &firstD, &r0);
         if (dig) { vLo = loD; vHi = hiD; }
+        else     { vLo = cLo; vHi = cHi; }
         uint8_t sig = ((vHi - vLo) > VM_SIG_SPAN_V) ? 1U : 0U;
 
         /* ---- بازسازی قفل‌شده روی ماشه (مثل DSO): پریود و عرض پالس = «میانه»ی همه‌ی لبه‌های ثبت‌شده.
@@ -1581,7 +1735,7 @@ static void App_Scope(void)
         uint8_t fold = 0U;
         float dutyF = dutyD;
         float jit = 0.0f;
-        const float *dv = dig ? s_scR : s_scV;
+        const float *dv = s_scC;      /* همیشه نمونه‌های واقعی (جبران‌شده)؛ هیچ موجی ساخته نمی‌شه (مثل DSO) */
         uint32_t start = 0U;
 
         uint8_t candidate = 0U;
@@ -1696,7 +1850,7 @@ static void App_Scope(void)
                 lockState = 0U;
         }
 
-        if (lockState && lockP >= 8.0f &&
+        if (0 && lockState && lockP >= 8.0f &&      /* بازسازی مصنوعی خاموش */
             lockW > 1.0f && lockW < lockP)
         {
             fold = 1U;
@@ -1725,27 +1879,23 @@ static void App_Scope(void)
 //                if (dv[i - 1U] < midv && dv[i] >= midv) { start = i; break; }
 //        }
 
-        if (!fold && sig)
         {
-            const float midv = 0.5f * (vLo + vHi);
-            uint8_t triggerFound = 0U;
-
-            for (uint32_t i = 1U; i < (SC_N - SC_SHOW); i++)
+            /* ماشه‌ی لبه‌ی بالارونده روی وسط دامنه‌ی واقعی با هیسترزیس (مثل DSO) ؛ بدون ماشه = آزادگرد (Auto) */
+            const float spanV = cHi - cLo;
+            const float midv  = 0.5f * (cHi + cLo);
+            const float armV  = midv - 0.10f * spanV;
+            if (spanV > VM_SIG_SPAN_V)
             {
-                if (dv[i - 1U] < midv && dv[i] >= midv)
+                uint8_t armed = (dv[0] < armV) ? 1U : 0U;
+                for (uint32_t i = 1U; i < (SC_N - SC_SHOW); i++)
                 {
-                    start = i;
-                    triggerFound = 1U;
-                    break;
+                    if (dv[i] < armV) armed = 1U;
+                    else if (armed && dv[i] >= midv) { start = i; break; }
                 }
             }
-
-            /* بدون Trigger معتبر، فریم جدید رسم نشود */
-            if (!triggerFound)
-                continue;
         }
 
-        float    vtop  = vm_pick_scale(vHi);
+        float    vtop  = vm_pick_scale(dispHi);
         uint32_t nShow = SC_SHOW / (uint32_t)k_zm[zi];
         const uint16_t yMin = SCOPE_Y0, yMax = (uint16_t)(SCOPE_Y0 + SCOPE_H - 1U);
         uint16_t prevY = 0xFFFFU;
@@ -1805,6 +1955,7 @@ static void App_Scope(void)
 
         if (tb == 0U)
         {
+            if (fok || !sig) autoFail = 0U;
             if (!sig) autoGapUs = VM_AUTO_DEF_US;
             else if (fok)
             {
@@ -1818,7 +1969,12 @@ static void App_Scope(void)
                 if (df * 2U > autoGapUs + 4U) autoGapUs = gn;   /* فقط با تغییر بیش از ۵۰٪ تایم‌بیس عوض بشه */
             }
             else if (tooFast) autoGapUs = 0U;
-            else { autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > SC_AUTO_MAX_US) autoGapUs = SC_AUTO_MAX_US; }
+            else
+            {
+                /* فقط بعد از ۴ فریم ناموفق پشت سر هم تایم‌بیس رو عوض کن (یه فریم خراب نباید همه‌چیز رو بهم بریزه) */
+                if (autoFail < 255U) autoFail++;
+                if (autoFail >= 4U) { autoFail = 0U; autoGapUs = autoGapUs * 2U + 10U; if (autoGapUs > SC_AUTO_MAX_US) autoGapUs = SC_AUTO_MAX_US; }
+            }
         }
 
         char b[40], t1[12], t2[12], t3[12];
@@ -1827,7 +1983,7 @@ static void App_Scope(void)
         else     { snprintf(t2, sizeof t2, "--"); snprintf(t3, sizeof t3, "--"); }
         snprintf(b, sizeof b, "H%sV %skHz D%s%%   ", t1, t2, t3);
         UI_Text(2U, 206U, 1U, UI_DIM, UI_BG, b);
-        snprintf(b, sizeof b, "TB:%s Z:x%u %s J%u%% e%u  ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", (unsigned)(jit * 100.0f), (unsigned)s_scNe);
+        snprintf(b, sizeof b, "TB:%s Z:x%u %s %s k%u  ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", src ? "PC4" : "PB0", (unsigned)(s_cmpRho + 0.5f));
         UI_Text(2U, 218U, 1U, UI_DIM, UI_BG, b);
         LED_Blue_Set(sig);
     }
