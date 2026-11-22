@@ -1403,7 +1403,7 @@ static float sc_counts_to_vin(uint32_t c) { return Adc_PinToVinLinear((float)c *
  * پایین موج روی GND کلیپ می‌شه (کلمپ ورودی) ؛ هر جا نمونه ≈ ۰ بود حالت فیلتر ریست و خروجی ۰ در نظر گرفته می‌شه.
  * محدودیت: موج‌های سینوسی/مثلثی که به زیر ۰ می‌رن فقط تقریبی درست می‌شن (اطلاعات کلیپ‌شده برنمی‌گرده).
  * --------------------------------------------------------------------------------------------------- */
-#define SC_CMP_RHO0      10.0f        /* مقدار اولیه‌ی rho قبل از یادگیری */
+#define SC_CMP_RHO0      1.0f        /* مقدار اولیه‌ی rho قبل از یادگیری */
 #define SC_CMP_TAU0      0.0005f      /* مقدار اولیه‌ی tb (ثانیه) */
 #define SC_CMP_CLIP_V    0.15f        /* زیر این ولت (مقیاس ورودی) = کلیپ‌شده‌ی صفر */
 static float s_cmpRho = SC_CMP_RHO0;
@@ -2194,7 +2194,258 @@ static uint8_t wt_learn(WtRef_t *ref)
 /*  کلیدها:  OK = یاد گرفتن مرجع (Probe1 کنار Probe2 روی سیم سالم)          */
 /*           L/R = حالت بوق (قطع / سالم / بی‌صدا)   U/D = فرکانس تست        */
 /* ================================================================== */
+/* ================================================================== */
+/*  تست سیم‌کشی: کوپلاژ خازنی از روی روکش (یا تماس مستقیم)                                          */
+/*                                                                                              */
+/*  P2 یه PWM ۵۰٪ توی سیم می‌فرسته؛ P1 رو روی سیم (حتی روی روکش پلاستیکی) می‌کشی. هر جا همون PWM رو دید     */
+/*  = WIRE OK ، هر جا ندید = BROKEN + بوق.                                                          */
+/*                                                                                              */
+/*  ⚠ چرا فرکانس «خیلی بالا» همیشه بهتر نیست؟ ورودی P1 (R8 → گره‌ی PB0 با C4=220pF به زمین) یه فیلتر          */
+/*    پایین‌گذره. سیگنال کوپل‌شده از روکش (خازن Cc ~ چند pF) توی گره‌ی PB0 تقریباً ≈ V × Cc / C4 می‌شه، یعنی     */
+/*    مستقل از فرکانس، ولی فقط تا جایی که 1/(2π·f·R8·C4) >> 1 و جریان از R8 رد بشه (چند ده kHz تا چند صد kHz).  */
+/*    بالاتر، خازن پراکنده‌ی نوک پروب جریان رو می‌گیره و بعدش فیلتر R8·C4 دوباره ۱۰۰ برابر ضعیفش می‌کنه:       */
+/*    در 20MHz کوپلاژ از روکش چند ده میکروولت می‌شه (زیر نویز ADC) ؛ در عوض تماس مستقیم فلز-به-فلز در همه‌ی       */
+/*    فرکانس‌ها دیده می‌شه. به‌جای حدس زدن، دکمه‌ی OK همه‌ی فرکانس‌ها (5kHz..20MHz) رو اسکن می‌کنه و بهترین       */
+/*    نسبت سیگنال/نویز رو با P1 روی سیم انتخاب می‌کنه.                                               */
+/*    ۱۰۰MHz با این سخت‌افزار شدنی نیست (74HC125 + R35=100Ω + کابل + ADC با ~0.77MS/s) ؛ سقف عملی ≈ 20MHz.    */
+/*                                                                                              */
+/*  تشخیص: ۲۰۴۸ نمونه‌ی ADC از PB0 با گام ثابت (هم‌زمان با کلاک PWM) ؛ دامنه‌ی مولفه‌ی دقیقاً هم‌فرکانس PWM با       */
+/*  lock-in (پنجره‌ی Hann) ؛ نویز از دو «فرکانس خالی» (×1.37 و ×0.61) توی همون ضبط → PWM هیچ‌وقت قطع نمی‌شه      */
+/*  (قبلاً هر ۱۵ms برای اندازه‌گیری نویز خاموش/روشن می‌شد).                                          */
+/*  کلیدها: OK = اسکن فرکانس (P1 روی سیم)   L/R = فرکانس دستی   U/D = صدا   BACK                      */
+/* ================================================================== */
+#define WP_N          2048U      /* نمونه‌ی ADC در هر اندازه‌گیری (~2.7ms ؛ باید ≤ VM_N باشه) */
+#define WP_GAP        4U         /* گام حداقلی = 360+4 سیکل ؛ گام واقعی با wp_pick_step انتخاب می‌شه */
+#define WP_NOISE_FLOOR 1.5       /* کف نویز دامنه (شمارش ADC ؛ هر شمارش ≈ 50µV) */
+#define WP_SNR_MIN    4.0        /* دامنه باید حداقل این‌قدر برابر نویز باشه (نگه‌داشتن ۱۲۰ms چند اندازه‌گیری رو جمع می‌کنه) */
+#define WP_AMP_MIN    5.0        /* ... و حداقل این‌قدر شمارش (≈ 250µV روی پایه‌ی ADC) */
+#define WP_REF_FRAC   0.30       /* بعد از اسکن: حداقل این کسر از دامنه‌ی موقع اسکن (تلورانس دامنه) */
+#define WP_BEEP_HOLD  120U       /* ms: قطع‌شدن‌های خیلی کوتاه هم شنیده بشن */
+
+static const uint32_t k_wpF[] = { 5000U, 10000U, 20000U, 50000U, 100000U, 200000U, 500000U,
+                                  1000000U, 2000000U, 5000000U, 10000000U, 20000000U };
+#define WP_F_COUNT   ((uint8_t)(sizeof k_wpF / sizeof k_wpF[0]))
+#define WP_F_DEFAULT 3U          /* 50 kHz تا اسکن انجام بشه */
+
+static double wp_sqrt(double a2)
+{
+    if (a2 <= 0.0) return 0.0;
+    double r = (a2 > 1.0) ? a2 : 1.0;
+    for (int it = 0; it < 40; it++) r = 0.5 * (r + a2 / r);
+    return r;
+}
+
+/* گام نمونه‌برداری (سیکل CPU): نسبت f/fs برای همه‌ی تن‌ها (سیگنال و دو تن نویز) از 0 و 0.5 دور باشه
+ * (وگرنه بعد از aliasing روی DC یا روی خودش می‌افتن). */
+static uint32_t wp_pick_step(double f, const double *tones, uint32_t nt, uint32_t minStep, double clk)
+{
+    uint32_t best = minStep; double bestM = -1.0;
+    for (uint32_t st = minStep; st < minStep + 120U; st++)
+    {
+        double m = 1.0;
+        for (uint32_t k = 0U; k < nt; k++)
+        {
+            double q = tones[k] * f * (double)st / clk; q -= (double)(uint64_t)q;     /* 0..1 */
+            double d = (q < 0.25) ? q : (q < 0.5) ? 0.5 - q : (q < 0.75) ? q - 0.5 : 1.0 - q;
+            if (d < m) m = d;
+        }
+        if (m > bestM) { bestM = m; best = st; }
+    }
+    return best;
+}
+
+/* دامنه‌ی قله‌ی مولفه‌ی f (شمارش ADC) با lock-in و پنجره‌ی Hann (نشت از سیگنال قوی به تن‌های نویز ناچیز) ؛
+ * فاز مجهول ، DC و کند حذف. نمونه i در زمان i*step/clk گرفته شده. */
+static double wp_demod(const uint16_t *x, uint32_t n, double f, uint32_t step, double clk)
+{
+    double mean = 0.0;
+    for (uint32_t i = 0U; i < n; i++) mean += (double)x[i];
+    mean /= (double)n;
+
+    double q = f * (double)step / clk; q -= (double)(uint64_t)q;
+    double th = 6.283185307179586 * q; int neg = 0;
+    if (th > 3.141592653589793) { th = 6.283185307179586 - th; neg = 1; }
+    float sn, cs; wt_sincos((float)th, &sn, &cs);
+    const double c = (double)cs, s = neg ? -(double)sn : (double)sn;
+    float hs_, hc_; wt_sincos((float)(6.283185307179586 / (double)n), &hs_, &hc_);
+    const double hc = (double)hc_, hs = (double)hs_;
+
+    double pr = 1.0, pi = 0.0, hr = 1.0, hi = 0.0, I = 0.0, Q = 0.0, W = 0.0;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        const double w = 0.5 - 0.5 * hr;                      /* Hann */
+        const double d = ((double)x[i] - mean) * w;
+        I += d * pr; Q += d * pi; W += w;
+        double nr = pr * c - pi * s, ni = pr * s + pi * c;
+        double nhr = hr * hc - hi * hs, nhi = hr * hs + hi * hc;
+        if ((i & 63U) == 63U)                                 /* مدول 1 بمونه (خطای گردکردن) */
+        {
+            double m2 = 1.5 - 0.5 * (nr * nr + ni * ni);   nr *= m2; ni *= m2;
+            double h2 = 1.5 - 0.5 * (nhr * nhr + nhi * nhi); nhr *= h2; nhi *= h2;
+        }
+        pr = nr; pi = ni; hr = nhr; hi = nhi;
+    }
+    return (W > 0.0) ? 2.0 * wp_sqrt(I * I + Q * Q) / W : 0.0;
+}
+
+/* فرکانس واقعی PWM از رجیسترها: کلاک تایمر ÷ (PSC+1) ÷ (ARR+1) */
+static double wp_f_actual(void)
+{
+    return (double)(HAL_RCC_GetPCLK2Freq() * 2U) / (((double)TIM15->PSC + 1.0) * ((double)TIM15->ARR + 1.0));
+}
+
+/* یک ضبط از PB0: دامنه‌ی سیگنال (f) و نویز (بیشینه‌ی دو فرکانس خالی) ، هر دو شمارش ADC */
+static uint8_t wp_capture(double f, double *aSig, double *aNz)
+{
+    static const double k_t[3] = { 1.0, 1.37, 0.61 };
+    const double clk = (double)SystemCoreClock;
+    uint32_t step = wp_pick_step(f, k_t, 3U, ADC_CAP_MIN_STEP_CYC + WP_GAP, clk);
+    uint32_t cyc  = Adc_CapturePB0(s_vmBuf, WP_N, step - ADC_CAP_MIN_STEP_CYC);
+    if (cyc == 0U) return 0U;
+    const uint32_t se = cyc / WP_N;
+    *aSig = wp_demod(s_vmBuf, WP_N, f * k_t[0], se, clk);
+    const double n1 = wp_demod(s_vmBuf, WP_N, f * k_t[1], se, clk);
+    const double n2 = wp_demod(s_vmBuf, WP_N, f * k_t[2], se, clk);
+    double nz = (n1 > n2) ? n1 : n2;
+    *aNz = (nz < WP_NOISE_FLOOR) ? WP_NOISE_FLOOR : nz;
+    return 1U;
+}
+
+typedef struct { uint8_t valid; double ref; } WpCal_t;     /* دامنه‌ی موقع اسکن */
+
+/* اسکن همه‌ی فرکانس‌ها با P1 روی سیم: بهترین نسبت سیگنال/نویز ؛ بین فرکانس‌هایی که ≥70٪ بهترین‌ان کمترین رو
+ * برمی‌دارم (فرکانس پایین‌تر = کم‌حساس‌تر به کابل و پراکندگی). 1 = موفق. */
+static uint8_t wp_sweep(uint8_t *bestFi, double *refAmp)
+{
+    double sc[WP_F_COUNT], am[WP_F_COUNT], best = -1.0;
+    char b[24];
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+    {
+        sc[i] = 0.0; am[i] = 0.0;
+        Probe_PwmStart(PROBE_2, k_wpF[i], 50U);
+        HAL_Delay(3);
+        double a1, n1, a2, n2;
+        if (!wp_capture(wp_f_actual(), &a1, &n1)) continue;
+        if (!wp_capture(wp_f_actual(), &a2, &n2)) { a2 = a1; n2 = n1; }
+        am[i] = (a1 < a2) ? a1 : a2;                        /* کمینه‌ی دو ضبط: ضبط‌های اتفاقی رو حذف می‌کنه */
+        const double nz = (n1 > n2) ? n1 : n2;
+        sc[i] = (am[i] >= WP_AMP_MIN) ? am[i] / nz : 0.0;
+        if (sc[i] > best) best = sc[i];
+        snprintf(b, sizeof b, "Scan %u/%u      ", (unsigned)(i + 1U), (unsigned)WP_F_COUNT);
+        UI_Text(10U, 100U, 2U, UI_ORANGE, UI_BG, b);
+    }
+    if (best < WP_SNR_MIN) return 0U;                        /* با P1 روی سیم هم چیزی دیده نشد */
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+        if (sc[i] >= 0.7 * best) { *bestFi = i; *refAmp = am[i]; return 1U; }
+    return 0U;
+}
+
+static void wp_line(uint16_t y, uint16_t fg, const char *txt, char *cache)
+{
+    if (strncmp(cache, txt, 31U) == 0) return;          /* فقط وقتی متن عوض شده دوباره بکش (بدون چشمک) */
+    snprintf(cache, 32U, "%s", txt);
+    UI_Text(10U, y, 2U, fg, UI_BG, txt);
+}
+
+static void wp_fmt_f(char *dst, size_t n, uint32_t f)
+{
+    if (f >= 1000000U) snprintf(dst, n, "%luMHz", (unsigned long)(f / 1000000U));
+    else               snprintf(dst, n, "%lukHz", (unsigned long)(f / 1000U));
+}
+
 static void App_WiringTest(void)
+{
+    LEDs_AllOff();
+    Probe_AllOff();
+    UI_Begin("WIRING TEST");
+    UI_Hint("OK scan L/R f U/D snd");
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+
+    uint8_t  fi = WP_F_DEFAULT, snd = 1U, ok = 0U, shown = 2U;
+    uint32_t last = 0U - 100U, lastGood = 0U - 1000U, lastDraw = 0U - 1000U, msgUntil = 0U;
+    char     c1[32] = "", c2[32] = "", c3[32] = "", c4[32] = "", msg[24] = "";
+    WpCal_t  cal = { 0U, 0.0 };
+
+    Probe_PwmStart(PROBE_2, k_wpF[fi], 50U);            /* P2 خروجی می‌ده ، P1 فقط می‌خونه (OE=Hi-Z) */
+    HAL_Delay(5);
+
+    for (;;)
+    {
+        MenuInput_t in = UI_Poll();
+        if (in == MENU_INPUT_BACK) break;
+        if (in == MENU_INPUT_LEFT  && fi > 0U)              { fi--; cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); shown = 2U; lastDraw = 0U - 1000U; }
+        if (in == MENU_INPUT_RIGHT && fi + 1U < WP_F_COUNT) { fi++; cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); shown = 2U; lastDraw = 0U - 1000U; }
+        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN)   { snd = (uint8_t)!snd; lastDraw = 0U - 1000U; }
+        if (in == MENU_INPUT_SELECT)                        /* اسکن فرکانس: P1 باید روی سیم (روکش یا فلز) باشه */
+        {
+            wt_buzzer(0U);
+            LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
+            UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 on the wire..");
+            HAL_Delay(1200);
+            uint8_t bf = fi; double ra = 0.0;
+            if (wp_sweep(&bf, &ra))
+            {
+                fi = bf; cal.valid = 1U; cal.ref = ra;
+                char t[12]; wp_fmt_f(t, sizeof t, k_wpF[fi]);
+                snprintf(msg, sizeof msg, "Best %s", t);
+            }
+            else
+            {
+                cal.valid = 0U; fi = WP_F_DEFAULT;
+                snprintf(msg, sizeof msg, "No signal!");
+            }
+            Probe_PwmStart(PROBE_2, k_wpF[fi], 50U);
+            HAL_Delay(3);
+            msgUntil = HAL_GetTick() + 2500U;
+            shown = 2U; lastDraw = 0U - 1000U;
+            c1[0] = c2[0] = c3[0] = c4[0] = '\0';
+        }
+
+        if (!TICK_DUE(last, 15U)) continue;
+        last = HAL_GetTick();
+
+        double aSig = 0.0, aNz = WP_NOISE_FLOOR;
+        uint8_t got = wp_capture(wp_f_actual(), &aSig, &aNz);
+        uint8_t good = (got && aSig >= WP_AMP_MIN && aSig >= WP_SNR_MIN * aNz &&
+                        (!cal.valid || aSig >= WP_REF_FRAC * cal.ref)) ? 1U : 0U;
+        if (good) lastGood = HAL_GetTick();
+        ok = ((uint32_t)(HAL_GetTick() - lastGood) < WP_BEEP_HOLD) ? 1U : 0U;
+        wt_buzzer((uint8_t)(snd && !ok));                 /* هر جا PWM نیومد = قطع = بوق */
+        LED_Blue_Set(ok);
+
+        if (!TICK_DUE(lastDraw, 150U) && ok == shown) continue;   /* LCD کند است: خیلی کم‌تر از اندازه‌گیری رسم می‌شه */
+        lastDraw = HAL_GetTick();
+
+        if (ok != shown)
+        {
+            shown = ok;
+            LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
+            UI_Text(10U, 64U, 4U, ok ? UI_OK : UI_BAD, UI_BG, ok ? "WIRE OK" : "BROKEN");
+        }
+        char t[12], line[32];
+        wp_fmt_f(t, sizeof t, k_wpF[fi]);
+        snprintf(line, sizeof line, "P2 %s %s       ", t, cal.valid ? "SCAN" : "MAN");
+        wp_line(124U, UI_DIM, line, c1);
+        snprintf(line, sizeof line, "sig %luuV       ", (unsigned long)(aSig * 50.35));
+        wp_line(148U, UI_CYAN, line, c2);
+        unsigned snr = (unsigned)((aNz > 0.0) ? aSig / aNz : 0.0); if (snr > 999U) snr = 999U;
+        snprintf(line, sizeof line, "nz %luuV x%u     ", (unsigned long)(aNz * 50.35), snr);
+        wp_line(172U, UI_CYAN, line, c3);
+        if (HAL_GetTick() < msgUntil) snprintf(line, sizeof line, "%-15s", msg);
+        else                          snprintf(line, sizeof line, "%s              ", snd ? "Snd ON" : "Snd OFF");
+        wp_line(196U, UI_DIM, line, c4);
+    }
+
+    wt_buzzer(0U);
+    LED_Blue_Set(0);
+    Probe_PwmStop();
+    Probe_AllOff();
+    LEDs_AllOff();
+}
+
+__attribute__((unused)) static void App_WiringTestAdc(void)
 {
     static const char *const k_beepName[3] = { "on BREAK", "on OK   ", "OFF     " };
 

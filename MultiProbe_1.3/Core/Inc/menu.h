@@ -12,8 +12,8 @@
 #define LED_BLUE_Pin         GPIO_PIN_9
 #define LED_BLUE_GPIO_Port   GPIOD
 
-#define LED_GREEN_Pin        GPIO_PIN_10
-#define LED_GREEN_GPIO_Port  GPIOD
+#define LED_PINK_Pin        GPIO_PIN_10
+#define LED_PINK_GPIO_Port  GPIOD
 
 #include "main.h"
 

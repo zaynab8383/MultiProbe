@@ -236,3 +236,53 @@ void Adc_SelfTest(void)
 
     g_vdda = __LL_ADC_CALC_VREFANALOG_VOLTAGE(g_vrefint_raw, ADC_RESOLUTION_16B) / 1000.0f;
 }
+
+
+/* ------------------------------------------------------------------------------------------------
+ * شمارش لبه‌ی دیجیتال PB0 (تست سیم‌کشی ، PWM تا چند MHz)
+ * ADC برای ۱MHz کند و مسیر آنالوگ موج رو خراب می‌کنه؛ ولی همون گره‌ی PB0 رو خود پایه‌ی دیجیتال
+ * (آستانه‌ی ~1.6V) تمیز می‌بینه. حلقه داخل RAM (.RamFunc) اجرا می‌شه نه فلش رمزشده‌ی QSPI.
+ * هر نمونه ~۲۰-۳۰ سیکل (~۱۰ MS/s) ؛ تا ۲MHz هر نیم‌پریود حداقل یک نمونه داره، پس شمارش لبه دقیقه.
+ * ------------------------------------------------------------------------------------------------ */
+void Adc_Pb0DigitalBegin(void)
+{
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIOB->PUPDR &= ~(3UL << 0);          /* بدون pull (R8=1M به زمین هست) */
+    GPIOB->MODER &= ~(3UL << 0);          /* 00 = ورودی دیجیتال */
+}
+
+void Adc_Pb0DigitalEnd(void)
+{
+    GPIOB->MODER |= (3UL << 0);           /* 11 = آنالوگ ، مثل قبل برای OPAMP/ADC */
+}
+
+__attribute__((section(".RamFunc"), noinline, optimize("O2")))
+static uint32_t pb0_edge_ram(uint32_t window, uint32_t *rise, uint32_t *ones, uint32_t *tot)
+{
+    volatile uint32_t *idr = &GPIOB->IDR;
+    uint32_t pm = __get_PRIMASK();
+    __disable_irq();
+
+    uint32_t t0 = DWT->CYCCNT, now;
+    uint32_t prev = *idr & 1U, r = 0U, o = 0U, n = 0U;
+    do
+    {
+        uint32_t s = *idr & 1U;
+        r += s & (prev ^ 1U);              /* لبه‌ی بالارونده */
+        prev = s; o += s; n++;
+        now = DWT->CYCCNT - t0;
+    } while (now < window);
+
+    if (!pm) __enable_irq();
+    *rise = r; *ones = o; *tot = n;
+    return now;
+}
+
+uint32_t Adc_Pb0EdgeBurst(uint32_t window_cyc, uint32_t *rise, uint32_t *ones, uint32_t *tot)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+    if (window_cyc < 1000U)   window_cyc = 1000U;
+    if (window_cyc > 560000U) window_cyc = 560000U;      /* حداکثر ~2ms با وقفه‌ی بسته */
+    return pb0_edge_ram(window_cyc, rise, ones, tot);
+}

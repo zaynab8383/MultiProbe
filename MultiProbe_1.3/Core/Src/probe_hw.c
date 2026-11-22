@@ -171,7 +171,7 @@ void Probe_PwmStart(ProbeId_t p, uint32_t f, uint8_t duty)
 {
     ohm_gnd_off();                                  /* PE4 باید پایه‌ی تایمر باشه */
     if (f < 1U)      f = 1U;
-    if (f > 200000U) f = 200000U;
+    if (f > 24000000U) f = 24000000U;           /* سقف نرم‌افزاری فعلی؛ نه سقف خود تایمر MCU */
     if (duty > 100U) duty = 100U;
 
     /* تا وقتی تنظیمات عوض می‌شه هر دو خروجی غیرفعال */
@@ -184,14 +184,42 @@ void Probe_PwmStart(ProbeId_t p, uint32_t f, uint8_t duty)
         (void)HAL_TIMEx_PWMN_Stop(&htim15, TIM_CHANNEL_1);
     }
 
-    uint32_t tclk = HAL_RCC_GetPCLK2Freq() * 2U;            /* APB2 /2 -> کلاک تایمر ×۲ */
-    uint32_t psc  = tclk / (f * 65000UL);
-    uint32_t arr  = tclk / ((psc + 1U) * f) - 1U;
-    if (arr < 1U) arr = 1U;
+    const uint32_t pclk2 = HAL_RCC_GetPCLK2Freq();
+    const uint32_t tclk = pclk2 * 2U;                       /* APB2 prescaler=2؛ کلاک TIM15 دو برابر PCLK2 */
+
+    /* اگر کلاک تایمر آماده نیست، خروجی‌ها خاموش بمانند؛ هیچ تقسیم نامعتبری انجام نشود. */
+    if (tclk == 0U)
+    {
+        Probe_PwmStop();
+        return;
+    }
+
+    const uint64_t pscDen = (uint64_t)f * 65000ULL;
+    if (pscDen == 0ULL)
+    {
+        Probe_PwmStop();
+        return;
+    }
+
+    uint64_t psc64 = (uint64_t)tclk / pscDen;
+    if (psc64 > 65535ULL) psc64 = 65535ULL;                /* PSC تایمر ۱۶ بیتی است */
+    const uint32_t psc = (uint32_t)psc64;
+
+    const uint64_t periodDen = ((uint64_t)psc + 1ULL) * (uint64_t)f;
+    if (periodDen == 0ULL)
+    {
+        Probe_PwmStop();
+        return;
+    }
+
+    uint64_t ticks = ((uint64_t)tclk + (periodDen / 2ULL)) / periodDen; /* گرد کردن برای کمینه‌کردن خطای فرکانس */
+    if (ticks < 2ULL) ticks = 2ULL;                        /* حداقل دو شمارش برای PWM با دو سطح */
+    if (ticks > 65536ULL) ticks = 65536ULL;                /* ARR تایمر ۱۶ بیتی است */
+    const uint32_t arr = (uint32_t)(ticks - 1ULL);
 
     /* CH1N مکمل CH1 است؛ برای Probe2 دیوتی رو برعکس می‌کنیم تا همون دیوتی دلخواه دیده بشه */
     uint32_t d   = (p == PROBE_1) ? duty : (100U - duty);
-    uint32_t ccr = (uint32_t)(((uint64_t)(arr + 1U) * d) / 100U);
+    uint32_t ccr = (uint32_t)((ticks * (uint64_t)d) / 100ULL);
 
     __HAL_TIM_SET_PRESCALER(&htim15, psc);
     __HAL_TIM_SET_AUTORELOAD(&htim15, arr);
