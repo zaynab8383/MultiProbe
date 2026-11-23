@@ -20,6 +20,8 @@ void  Probe_AllOff(void);                     /* PWM قطع، OE ها HIGH، س�
 /* PWM: probe خروجی می‌ده (OE اون پایه LOW)، پروب دیگه Hi-Z می‌مونه */
 void  Probe_PwmStart(ProbeId_t p, uint32_t freq_hz, uint8_t duty_pct);
 void  Probe_PwmStop(void);
+uint32_t Probe_TimerClkHz(void);              /* کلاک واقعی TIM15/TIM1 (Hz) ، با DWT اندازه‌گیری‌شده */
+uint32_t Clock_MeasureCpuHz(void);            /* کلاک واقعی CPU با مرجع HSI (0 = ناموفق) */
 /* سیگنال دور موتور ۶۰-۲ : Probe1 = PWM ، Probe2 = PWM not ، فرکانس دندانه (Hz = rpm) */
 void  Probe_PwmStartCrank(uint32_t tooth_hz);
 

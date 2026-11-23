@@ -18,6 +18,7 @@ float Adc_PinToVinLinear(float pin_volts);
  * خروجی: تعداد سیکل CPU کل، 0 = خطا */
 uint32_t Adc_CapturePC4(uint16_t *dst, uint32_t n, uint32_t gap_cycles);
 uint32_t Adc_CapturePB0(uint16_t *dst, uint32_t n, uint32_t gap_cycles);   /* مثل بالا ولی مستقیم از گره‌ی ورودی پروب ۱ (بدون OPAMP) */
+uint32_t Adc_CapturePA6(uint16_t *dst, uint32_t n, uint32_t gap_cycles);   /* بافر پروب ۲ (PA6) ، مسیر تخت */
 /* ---- شمارش لبه‌ی دیجیتال روی PB0 (گره‌ی ورودی Probe1) برای تست سیم‌کشی ≥ 1 MHz ----
  * Adc_Pb0DigitalBegin: PB0 رو موقتاً ورودی دیجیتال می‌کنه ؛ Adc_Pb0DigitalEnd: دوباره آنالوگ (OPAMP/ADC).
  * Adc_Pb0EdgeBurst: window_cyc سیکل CPU (با وقفه‌ی بسته) پایه رو پشت‌سرهم می‌خونه.

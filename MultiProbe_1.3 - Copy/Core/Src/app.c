@@ -853,7 +853,7 @@ static void App_KeyTest(void)
 static void App_LedTest(void)
 {
     UI_Begin("LED TEST");
-    static const char *const names[4] = { "yellow", "blue", "green", "red" };
+    static const char *const names[4] = { "yellow", "blue", "pink", "red" };
     static const uint16_t cols[4]     = { 0xFFE0U, 0x041FU, 0x07E0U, 0xF800U };
     for (uint8_t i = 0U; i < 4U; i++)
     {
@@ -1627,7 +1627,7 @@ static void App_Scope(void)
 {
     LEDs_AllOff();
     UI_Begin("SCOPE");
-    UI_Hint("L/R zoom U/D rate OK hold L:src");
+    UI_Hint("L/R zoom U/D rate OK hold L@x1:src");
     LCD_FillRect(0U, SCOPE_Y0, LCD_WIDTH, SCOPE_H, 0x0000U);
     for (uint16_t x = 0U; x < LCD_WIDTH; x++) { s_scTop[x] = 0xFFFFU; s_scBot[x] = 0xFFFFU; }
 
@@ -1645,7 +1645,7 @@ static void App_Scope(void)
         if (in == MENU_INPUT_BACK) break;
         if (in == MENU_INPUT_RIGHT && zi + 1U < sizeof(k_zm)) { zi++; last = 0U - 1000U; }
         if (in == MENU_INPUT_LEFT  && zi > 0U)                { zi--; last = 0U - 1000U; }
-        else if (in == MENU_INPUT_LEFT)                       { src = (uint8_t)!src; last = 0U - 1000U; }
+        else if (in == MENU_INPUT_LEFT)                       { src = (uint8_t)((src + 1U) % 3U); last = 0U - 1000U; }
         if (in == MENU_INPUT_UP   && tb + 1U < (sizeof(k_tbUs) / sizeof(k_tbUs[0]))) { tb++; last = 0U - 1000U; }
         if (in == MENU_INPUT_DOWN && tb > 0U)                 { tb--; last = 0U - 1000U; }
         if (in == MENU_INPUT_SELECT) hold = (uint8_t)!hold;
@@ -1654,7 +1654,7 @@ static void App_Scope(void)
 
         uint32_t gapUs = (tb == 0U) ? autoGapUs : (uint32_t)k_tbUs[tb];
         uint32_t gap   = (SystemCoreClock / 1000000U) * gapUs;
-        uint32_t cyc   = src ? Adc_CapturePC4(s_scBuf, SC_N, gap) : Adc_CapturePB0(s_scBuf, SC_N, gap);
+        uint32_t cyc   = (src == 2U) ? Adc_CapturePA6(s_scBuf, SC_N, gap) : src ? Adc_CapturePC4(s_scBuf, SC_N, gap) : Adc_CapturePB0(s_scBuf, SC_N, gap);
         if (cyc == 0U) continue;
 
         uint32_t mn = 65535U, mx = 0U;
@@ -1662,15 +1662,23 @@ static void App_Scope(void)
         {
             if (s_scBuf[i] < mn) mn = s_scBuf[i];
             if (s_scBuf[i] > mx) mx = s_scBuf[i];
-            s_scV[i] = src ? vm_counts_to_vin(s_scBuf[i]) : sc_counts_to_vin(s_scBuf[i]);
+            s_scV[i] = (src == 2U) ? Probe_CountsToVolts(RD_PA6, s_scBuf[i]) : src ? vm_counts_to_vin(s_scBuf[i]) : sc_counts_to_vin(s_scBuf[i]);
         }
-        float vLo = src ? vm_counts_to_vin(mn) : sc_counts_to_vin(mn), vHi = src ? vm_counts_to_vin(mx) : sc_counts_to_vin(mx);
+        float vLo = (src == 2U) ? Probe_CountsToVolts(RD_PA6, mn) : src ? vm_counts_to_vin(mn) : sc_counts_to_vin(mn);
+        float vHi = (src == 2U) ? Probe_CountsToVolts(RD_PA6, mx) : src ? vm_counts_to_vin(mx) : sc_counts_to_vin(mx);
         const float dt = ((float)cyc / (float)SystemCoreClock) / (float)SC_N;
 
         /* جبران فیلتر RC ورودی (s_scR موقتاً بافر میانگین‌گیری) ؛ بعدش همه‌چیز (اندازه‌گیری و رسم) روی داده‌ی جبران‌شده */
         /* ۱) لبه‌های خام -> یادگیری rho/tb از سقف پالس‌ها ؛ ۲) فیلتر معکوس */
-        (void)sc_cmp_learn(s_scV, SC_N, dt);
-        sc_cmp_apply(s_scV, s_scC, SC_N, dt);
+        if (src == 2U)      /* PA6 = خروجی بافر پروب۲ (فالوئر، DC-coupled) : مسیر تخت، بدون هیچ جبرانی -> شکل موج واقعی */
+        {
+            for (uint32_t i = 0U; i < SC_N; i++) s_scC[i] = s_scV[i];
+        }
+        else
+        {
+            (void)sc_cmp_learn(s_scV, SC_N, dt);
+            sc_cmp_apply(s_scV, s_scC, SC_N, dt);
+        }
         float cLo = 1.0e9f, cHi = -1.0e9f;
         for (uint32_t i = 0U; i < SC_N; i++) { if (s_scC[i] < cLo) cLo = s_scC[i]; if (s_scC[i] > cHi) cHi = s_scC[i]; }
         if (cLo < 0.0f) cLo = 0.0f;
@@ -1983,7 +1991,7 @@ static void App_Scope(void)
         else     { snprintf(t2, sizeof t2, "--"); snprintf(t3, sizeof t3, "--"); }
         snprintf(b, sizeof b, "H%sV %skHz D%s%%   ", t1, t2, t3);
         UI_Text(2U, 206U, 1U, UI_DIM, UI_BG, b);
-        snprintf(b, sizeof b, "TB:%s Z:x%u %s %s k%u  ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", src ? "PC4" : "PB0", (unsigned)(s_cmpRho + 0.5f));
+        snprintf(b, sizeof b, "TB:%s Z:x%u %s %s k%u   ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", (src == 2U) ? "P2/PA6" : src ? "PC4" : "PB0", (unsigned)(s_cmpRho + 0.5f));
         UI_Text(2U, 218U, 1U, UI_DIM, UI_BG, b);
         LED_Blue_Set(sig);
     }
@@ -2288,10 +2296,15 @@ static double wp_demod(const uint16_t *x, uint32_t n, double f, uint32_t step, d
     return (W > 0.0) ? 2.0 * wp_sqrt(I * I + Q * Q) / W : 0.0;
 }
 
-/* فرکانس واقعی PWM از رجیسترها: کلاک تایمر ÷ (PSC+1) ÷ (ARR+1) */
+/* ضریب بین «فرکانسی که از رجیسترها حساب می‌شه» و فرکانس واقعی روی سیم ؛ در اسکن پیدا می‌شه (1 ، 0.5 یا 2).
+ * (روی این برد PWM نصف فرکانس درخواستی بیرون می‌اومد ؛ کلاک تایمر الان با DWT اندازه‌گیری می‌شه ولی این ضریب
+ *  هم همیشه با خود سیگنال چک می‌شه تا به هیچ فرضی بستگی نداشته باشه.) */
+static double s_wpK = 1.0;
+
+/* فرکانس PWM از رجیسترها: کلاک تایمر (اندازه‌گیری‌شده) ÷ (PSC+1) ÷ (ARR+1) */
 static double wp_f_actual(void)
 {
-    return (double)(HAL_RCC_GetPCLK2Freq() * 2U) / (((double)TIM15->PSC + 1.0) * ((double)TIM15->ARR + 1.0));
+    return (double)Probe_TimerClkHz() / (((double)TIM15->PSC + 1.0) * ((double)TIM15->ARR + 1.0)) * s_wpK;
 }
 
 /* یک ضبط از PB0: دامنه‌ی سیگنال (f) و نویز (بیشینه‌ی دو فرکانس خالی) ، هر دو شمارش ADC */
@@ -2317,26 +2330,34 @@ typedef struct { uint8_t valid; double ref; } WpCal_t;     /* دامنه‌ی م
  * برمی‌دارم (فرکانس پایین‌تر = کم‌حساس‌تر به کابل و پراکندگی). 1 = موفق. */
 static uint8_t wp_sweep(uint8_t *bestFi, double *refAmp)
 {
+    static const double k_kk[3] = { 1.0, 0.5, 2.0 };
     double sc[WP_F_COUNT], am[WP_F_COUNT], best = -1.0;
+    double kb[WP_F_COUNT];
     char b[24];
     for (uint8_t i = 0U; i < WP_F_COUNT; i++)
     {
-        sc[i] = 0.0; am[i] = 0.0;
+        sc[i] = 0.0; am[i] = 0.0; kb[i] = 1.0;
+        s_wpK = 1.0;
         Probe_PwmStart(PROBE_2, k_wpF[i], 50U);
         HAL_Delay(3);
-        double a1, n1, a2, n2;
-        if (!wp_capture(wp_f_actual(), &a1, &n1)) continue;
-        if (!wp_capture(wp_f_actual(), &a2, &n2)) { a2 = a1; n2 = n1; }
-        am[i] = (a1 < a2) ? a1 : a2;                        /* کمینه‌ی دو ضبط: ضبط‌های اتفاقی رو حذف می‌کنه */
-        const double nz = (n1 > n2) ? n1 : n2;
-        sc[i] = (am[i] >= WP_AMP_MIN) ? am[i] / nz : 0.0;
+        const double f0 = wp_f_actual();
+        for (uint8_t k = 0U; k < 3U; k++)                  /* فرکانس واقعی = ضریب × رجیستر (معمولاً 1) */
+        {
+            double a1, n1, a2, n2;
+            if (!wp_capture(f0 * k_kk[k], &a1, &n1)) continue;
+            if (!wp_capture(f0 * k_kk[k], &a2, &n2)) { a2 = a1; n2 = n1; }
+            const double aa = (a1 < a2) ? a1 : a2;          /* کمینه‌ی دو ضبط: ضبط‌های اتفاقی رو حذف می‌کنه */
+            const double nz = (n1 > n2) ? n1 : n2;
+            const double scr = (aa >= WP_AMP_MIN) ? aa / nz : 0.0;
+            if (scr > sc[i]) { sc[i] = scr; am[i] = aa; kb[i] = k_kk[k]; }
+        }
         if (sc[i] > best) best = sc[i];
         snprintf(b, sizeof b, "Scan %u/%u      ", (unsigned)(i + 1U), (unsigned)WP_F_COUNT);
         UI_Text(10U, 100U, 2U, UI_ORANGE, UI_BG, b);
     }
-    if (best < WP_SNR_MIN) return 0U;                        /* با P1 روی سیم هم چیزی دیده نشد */
+    if (best < WP_SNR_MIN) { s_wpK = 1.0; return 0U; }       /* با P1 روی سیم هم چیزی دیده نشد */
     for (uint8_t i = 0U; i < WP_F_COUNT; i++)
-        if (sc[i] >= 0.7 * best) { *bestFi = i; *refAmp = am[i]; return 1U; }
+        if (sc[i] >= 0.7 * best) { *bestFi = i; *refAmp = am[i]; s_wpK = kb[i]; return 1U; }
     return 0U;
 }
 
@@ -2367,6 +2388,8 @@ static void App_WiringTest(void)
     uint32_t last = 0U - 100U, lastGood = 0U - 1000U, lastDraw = 0U - 1000U, msgUntil = 0U;
     char     c1[32] = "", c2[32] = "", c3[32] = "", c4[32] = "", msg[24] = "";
     WpCal_t  cal = { 0U, 0.0 };
+    s_wpK = 1.0;
+    const uint32_t cpuHz = Clock_MeasureCpuHz();         /* مرجع مستقل (HSI) ؛ باید ≈ SystemCoreClock باشه */
 
     Probe_PwmStart(PROBE_2, k_wpF[fi], 50U);            /* P2 خروجی می‌ده ، P1 فقط می‌خونه (OE=Hi-Z) */
     HAL_Delay(5);
@@ -2434,7 +2457,7 @@ static void App_WiringTest(void)
         snprintf(line, sizeof line, "nz %luuV x%u     ", (unsigned long)(aNz * 50.35), snr);
         wp_line(172U, UI_CYAN, line, c3);
         if (HAL_GetTick() < msgUntil) snprintf(line, sizeof line, "%-15s", msg);
-        else                          snprintf(line, sizeof line, "%s              ", snd ? "Snd ON" : "Snd OFF");
+        else                          snprintf(line, sizeof line, "%s C%luM x%s     ", snd ? "S:ON" : "S:OFF", (unsigned long)((cpuHz + 500000U) / 1000000U), (s_wpK > 1.5) ? "2" : (s_wpK < 0.75) ? "0.5" : "1");
         wp_line(196U, UI_DIM, line, c4);
     }
 

@@ -103,6 +103,102 @@ static void crank_disable(void)
     HAL_NVIC_DisableIRQ(TIM15_IRQn);
 }
 
+/* کلاک واقعی TIM15 (Hz) ، اندازه‌گیری‌شده با شمارنده‌ی سیکل CPU (DWT).
+ * چرا؟ فرمول «PCLK2×2» روی این برد نصف مقدار واقعی رو می‌داد: PWM همیشه نصف فرکانس درخواستی بیرون می‌اومد
+ * (۲kHz ← ۱kHz ، روی صفحه‌ی تست سیم‌کشی هم ۲۰MHz ← ۱۰MHz دیده شد). اینجا تایمر رو چند میکروثانیه آزاد می‌دوونیم
+ * و نسبتش به سیکل CPU رو می‌خونیم ؛ نتیجه به نزدیک‌ترین نسبت‌های ساده‌ی ۰٫۲۵/۰٫۵/۱/۲/۴ گرد می‌شه. فقط یک‌بار (کش). */
+static uint32_t tim15_clk_hz(void)
+{
+    static uint32_t s_clk = 0U;
+    if (s_clk != 0U) return s_clk;
+
+    const uint32_t nominal = HAL_RCC_GetPCLK2Freq() * 2U;
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+
+    const uint32_t cr1 = TIM15->CR1, psc = TIM15->PSC, arr = TIM15->ARR;
+    TIM15->CR1 &= ~TIM_CR1_CEN;
+    TIM15->PSC  = 0U;
+    TIM15->ARR  = 0xFFFFU;
+    TIM15->EGR  = TIM_EGR_UG;                  /* PSC/ARR لود بشه ، شمارنده صفر */
+    TIM15->CNT  = 0U;
+    uint32_t t0 = DWT->CYCCNT;
+    TIM15->CR1 |= TIM_CR1_CEN;
+    while ((DWT->CYCCNT - t0) < 4000U) { }
+    uint32_t cnt = TIM15->CNT;
+    uint32_t cyc = DWT->CYCCNT - t0;
+    TIM15->CR1 &= ~TIM_CR1_CEN;
+    TIM15->PSC  = psc;
+    TIM15->ARR  = arr;
+    TIM15->CNT  = 0U;
+    TIM15->SR   = 0U;
+    TIM15->CR1  = cr1;
+
+    uint32_t clk = nominal;
+    if (cyc != 0U && cnt != 0U)
+    {
+        float r = ((float)cnt / (float)cyc) * ((float)SystemCoreClock / (float)nominal);   /* نسبت به فرض قبلی */
+        static const float k_r[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+        for (uint32_t i = 0U; i < 5U; i++)
+        {
+            float d = (r - k_r[i]) / k_r[i]; if (d < 0.0f) d = -d;
+            if (d < 0.08f) { clk = (uint32_t)((float)nominal * k_r[i]); break; }
+        }
+    }
+    s_clk = clk;
+    return clk;
+}
+
+uint32_t Probe_TimerClkHz(void) { return tim15_clk_hz(); }
+
+/* کلاک واقعی CPU (Hz) با مرجع مستقل: HSI (≈64MHz ، کریستال/اسیلاتور برد نیست) از طریق LPTIM1.
+ * اگه عددی که برمی‌گرده با SystemCoreClock (که از HSE_VALUE=25MHz حساب می‌شه) فرق داشته باشه یعنی اسیلاتور برد
+ * (توی BOM: SIT9003 ... 35.00000) با فرض نرم‌افزار جور نیست. دقت ≈ ±۲٪ (دقت HSI). 0 = اندازه‌گیری ناموفق. */
+static uint32_t lp1_read(void)
+{
+    uint32_t a, b;
+    do { a = LPTIM1->CNT; b = LPTIM1->CNT; } while (a != b);          /* دامنه‌ی کلاک ناهمگام: دو خوانش یکسان */
+    return a & 0xFFFFU;
+}
+
+uint32_t Clock_MeasureCpuHz(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+
+    RCC->CR |= RCC_CR_HSION;
+    uint32_t to = 2000000U;
+    while (!(RCC->CR & RCC_CR_HSIRDY) && --to) { }
+    if (to == 0U) return 0U;
+    const uint32_t hsi = 64000000U >> ((RCC->CR & RCC_CR_HSIDIV) >> RCC_CR_HSIDIV_Pos);
+
+    RCC->CDCCIPR &= ~RCC_CDCCIPR_CKPERSEL;                              /* 00 = PER_CK ← HSI */
+    __HAL_RCC_LPTIM1_CLK_ENABLE();
+    RCC->CDCCIP2R = (RCC->CDCCIP2R & ~RCC_CDCCIP2R_LPTIM1SEL) | (5UL << RCC_CDCCIP2R_LPTIM1SEL_Pos);   /* 101 = per_ck */
+
+    LPTIM1->CR   = 0U;
+    LPTIM1->CFGR = 0U;                                                   /* کلاک داخلی ، بدون پیش‌تقسیم */
+    LPTIM1->CR   = LPTIM_CR_ENABLE;
+    LPTIM1->ICR  = LPTIM_ICR_ARROKCF;
+    LPTIM1->ARR  = 0xFFFFU;
+    to = 2000000U;
+    while (!(LPTIM1->ISR & LPTIM_ISR_ARROK) && --to) { }
+    if (to == 0U) { LPTIM1->CR = 0U; return 0U; }
+    LPTIM1->CR |= LPTIM_CR_CNTSTRT;
+    { volatile uint32_t t = DWT->CYCCNT; while ((DWT->CYCCNT - t) < 20000U) { } }   /* LPTIM شروع به شمردن کنه */
+
+    const uint32_t c0 = lp1_read();
+    const uint32_t t0 = DWT->CYCCNT;
+    while ((DWT->CYCCNT - t0) < 100000U) { }
+    const uint32_t c1 = lp1_read();
+    const uint32_t cyc = DWT->CYCCNT - t0;
+    LPTIM1->CR = 0U;
+
+    const uint32_t dc = (c1 - c0) & 0xFFFFU;
+    if (dc < 1000U) return 0U;
+    return (uint32_t)(((uint64_t)cyc * (uint64_t)hsi) / (uint64_t)dc);
+}
+
 void Probe_PwmStartCrank(uint32_t tooth_hz)
 {
     ohm_gnd_off();
@@ -118,7 +214,7 @@ void Probe_PwmStartCrank(uint32_t tooth_hz)
         (void)HAL_TIMEx_PWMN_Stop(&htim15, TIM_CHANNEL_1);
     }
 
-    uint32_t tclk = HAL_RCC_GetPCLK2Freq() * 2U;
+    uint32_t tclk = tim15_clk_hz();                         /* کلاک واقعی TIM15 (اندازه‌گیری‌شده) */
     uint32_t psc  = tclk / (tooth_hz * 65000UL);
     uint32_t arr  = tclk / ((psc + 1U) * tooth_hz) - 1U;
     if (arr < 3U) arr = 3U;
@@ -184,8 +280,7 @@ void Probe_PwmStart(ProbeId_t p, uint32_t f, uint8_t duty)
         (void)HAL_TIMEx_PWMN_Stop(&htim15, TIM_CHANNEL_1);
     }
 
-    const uint32_t pclk2 = HAL_RCC_GetPCLK2Freq();
-    const uint32_t tclk = pclk2 * 2U;                       /* APB2 prescaler=2؛ کلاک TIM15 دو برابر PCLK2 */
+    const uint32_t tclk = tim15_clk_hz();                   /* کلاک واقعی TIM15 (با DWT اندازه‌گیری‌شده ؛ فرمول PCLK2×2 روی این برد نصف می‌داد) */
 
     /* اگر کلاک تایمر آماده نیست، خروجی‌ها خاموش بمانند؛ هیچ تقسیم نامعتبری انجام نشود. */
     if (tclk == 0U)
@@ -487,7 +582,7 @@ uint8_t Probe_DacSineStart(uint32_t frequency_hz, float amplitude_v, float offse
     s_sineAmp = (uint16_t)((amplitude_v / vdda) * 4095.0f + 0.5f);
     s_sineIndex = 0U;
 
-    uint32_t timclk = HAL_RCC_GetPCLK2Freq() * 2U;
+    uint32_t timclk = tim15_clk_hz();                    /* TIM1 و TIM15 هر دو روی APB2 هستن */
     uint32_t update_hz = frequency_hz * DAC_SINE_N;
     uint32_t arr = timclk / update_hz;
     if (arr < 2U) return 0U;

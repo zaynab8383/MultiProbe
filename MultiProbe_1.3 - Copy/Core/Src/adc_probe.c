@@ -286,3 +286,9 @@ uint32_t Adc_Pb0EdgeBurst(uint32_t window_cyc, uint32_t *rise, uint32_t *ones, u
     if (window_cyc > 560000U) window_cyc = 560000U;      /* حداکثر ~2ms با وقفه‌ی بسته */
     return pb0_edge_ram(window_cyc, rise, ones, tot);
 }
+
+/* PA6 = ADC1_IN3 : خروجی بافر (TLV9002 فالوئر) ورودی پروب ۲ ؛ مسیر تخت و کم‌امپدانس -> بدون اعوجاج RC (برای دیدن شکل موج واقعی) */
+uint32_t Adc_CapturePA6(uint16_t *dst, uint32_t n, uint32_t gap_cycles)
+{
+    return adc_capture(ADC_CHANNEL_3, ADC_SAMPLETIME_8CYCLES_5, dst, n, gap_cycles);
+}

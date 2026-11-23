@@ -9,8 +9,8 @@
 #define LED_BLUE_PORT   GPIOD
 #define LED_BLUE_PIN    GPIO_PIN_9
 
-#define LED_GREEN_PORT  GPIOD
-#define LED_GREEN_PIN   GPIO_PIN_10
+#define LED_PINK_PORT  GPIOD
+#define LED_PINK_PIN   GPIO_PIN_10
 
 void LEDs_Init(void)
 {
@@ -27,7 +27,7 @@ void LEDs_AllOff(void)
 
     HAL_GPIO_WritePin(
         GPIOD,
-        LED_RED_PIN | LED_BLUE_PIN | LED_GREEN_PIN,
+        LED_RED_PIN | LED_BLUE_PIN | LED_PINK_PIN,
         GPIO_PIN_RESET
     );
 }
@@ -52,7 +52,7 @@ void LEDs_UpdateVoltage(float voltage)
 
     HAL_GPIO_WritePin(
         LED_RED_PORT,
-        LED_RED_PIN | LED_GREEN_PIN,
+        LED_RED_PIN | LED_PINK_PIN,
         GPIO_PIN_RESET
     );
 
@@ -68,12 +68,12 @@ void LEDs_UpdateVoltage(float voltage)
     else if (voltage >= 4.5f && voltage <= 5.3f)
     {
         HAL_GPIO_WritePin(
-            LED_GREEN_PORT,
-            LED_GREEN_PIN,
+        	LED_PINK_PORT,
+			LED_PINK_PIN,
             GPIO_PIN_SET
         );
     }
-    else if (voltage >= 10.5f && voltage <= 13.5f)
+    else if (voltage >= 11.5f)
     {
         HAL_GPIO_WritePin(
             LED_RED_PORT,
@@ -91,7 +91,7 @@ void LEDs_Set(uint8_t idx, uint8_t on)
     {
     case 0: HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, st); break;
     case 1: HAL_GPIO_WritePin(LED_BLUE_PORT,   LED_BLUE_PIN,   st); break;
-    case 2: HAL_GPIO_WritePin(LED_GREEN_PORT,  LED_GREEN_PIN,  st); break;
+    case 2: HAL_GPIO_WritePin(LED_PINK_PORT,  LED_PINK_PIN,  st); break;
     case 3: HAL_GPIO_WritePin(LED_RED_PORT,    LED_RED_PIN,    st); break;
     default: break;
     }
