@@ -167,7 +167,7 @@ uint32_t Clock_MeasureCpuHz(void)
     DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
 
     RCC->CR |= RCC_CR_HSION;
-    uint32_t to = 2000000U;
+    uint32_t to = 200000U;
     while (!(RCC->CR & RCC_CR_HSIRDY) && --to) { }
     if (to == 0U) return 0U;
     const uint32_t hsi = 64000000U >> ((RCC->CR & RCC_CR_HSIDIV) >> RCC_CR_HSIDIV_Pos);
@@ -181,7 +181,7 @@ uint32_t Clock_MeasureCpuHz(void)
     LPTIM1->CR   = LPTIM_CR_ENABLE;
     LPTIM1->ICR  = LPTIM_ICR_ARROKCF;
     LPTIM1->ARR  = 0xFFFFU;
-    to = 2000000U;
+    to = 200000U;
     while (!(LPTIM1->ISR & LPTIM_ISR_ARROK) && --to) { }
     if (to == 0U) { LPTIM1->CR = 0U; return 0U; }
     LPTIM1->CR |= LPTIM_CR_CNTSTRT;
