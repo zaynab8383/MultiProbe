@@ -2510,6 +2510,78 @@ __attribute__((unused)) static uint8_t wp_sweep(uint8_t *bestFi, double *refAmp)
     return 0U;
 }
 
+/* کالیبراسیون خودکار (کلید OK) : روی هر فرکانس هم «روی سیم سالم» و هم «دور از سیم (هوا)» رو اندازه می‌گیره
+ * و فرکانسی رو انتخاب می‌کنه که بیشترین نسبت (سیم/هوا) رو می‌ده. ترتیب: اول روی سیم (تا ضریب واقعی فرکانس هم پیدا بشه) ، بعد هوا.
+ * خروجی: *bi = فرکانس انتخاب‌شده ، *ref = دامنه روی سیم ، *air = دامنه‌ی هوا ، s_wpK = ضریب فرکانس ؛ 1 = موفق */
+static void wp_fmt_f(char *dst, size_t n, uint32_t f);
+static uint8_t wp_autocal(uint8_t *bi, double *ref, double *air)
+{
+    static const double k_kk[3] = { 1.0, 0.5, 2.0 };
+    double wire[WP_F_COUNT], airA[WP_F_COUNT], nzA[WP_F_COUNT], kb[WP_F_COUNT];
+    wt_buzzer(0U);
+    LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
+    UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 ON the wire..");
+    HAL_Delay(2000);
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)                    /* ۱) روی سیم */
+    {
+        wire[i] = 0.0; nzA[i] = WP_NOISE_FLOOR; kb[i] = 1.0; s_wpK = 1.0;
+        Probe_PwmStart(PROBE_2, k_wpF[i], 50U); HAL_Delay(3);
+        const double f0 = wp_f_actual();
+        for (uint8_t k = 0U; k < 3U; k++)
+        {
+            double sum = 0.0, nzm = WP_NOISE_FLOOR; uint8_t cnt = 0U;
+            for (uint8_t r = 0U; r < 6U; r++) { double a, n; if (wp_capture(f0 * k_kk[k], &a, &n)) { sum += a; if (n > nzm) nzm = n; cnt++; } }
+            const double am = cnt ? sum / (double)cnt : 0.0;
+            if (am > wire[i]) { wire[i] = am; kb[i] = k_kk[k]; nzA[i] = nzm; }
+        }
+    }
+    wt_buzzer(1U); HAL_Delay(150); wt_buzzer(0U);
+    LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
+    UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 AWAY from wire");
+    HAL_Delay(2000);
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)                    /* ۲) هوا (با همون ضریبِ پیداشده) */
+    {
+        airA[i] = 0.0; s_wpK = kb[i];
+        Probe_PwmStart(PROBE_2, k_wpF[i], 50U); HAL_Delay(3);
+        const double f0 = wp_f_actual();
+        for (uint8_t r = 0U; r < 10U; r++)                          /* بیشینه: بدترین حالت نشت مستقیم P2->P1 */
+        { double a, n; if (wp_capture(f0, &a, &n)) { if (a > airA[i]) airA[i] = a; if (n > nzA[i]) nzA[i] = n; } }
+    }
+    double best = -1.0, sc[WP_F_COUNT];
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+    {
+        const double base = (airA[i] > nzA[i]) ? airA[i] : nzA[i];
+        sc[i] = (wire[i] >= 1.0) ? wire[i] / base : 0.0;          /* سیگنال ضعیف عایق هم قبول (قبلاً ≥5 شمارش لازم بود) */
+        if (sc[i] > best) best = sc[i];
+    }
+    s_wpK = 1.0;
+    int8_t pick = -1;                                              /* بین فرکانس‌هایی که ≥70٪ بهترین‌ان ، کمترین (کم‌حساس به کابل) */
+    if (best >= 1.6)
+        for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+            if (sc[i] >= 0.7 * best) { pick = (int8_t)i; break; }
+
+    /* جدول نتیجه: برای هر فرکانس «سیم / هوا / نسبت» ؛ ۷ ثانیه یا تا زدن یک کلید */
+    LCD_FillRect(0U, 52U, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - 52U - 14U), UI_BG);
+    UI_Text(4U, 52U, 1U, UI_ORANGE, UI_BG, "freq  wire  air  ratio");
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+    {
+        char ft[12], ln[40];
+        wp_fmt_f(ft, sizeof ft, k_wpF[i]);
+        const double base = (airA[i] > nzA[i]) ? airA[i] : nzA[i];
+        unsigned rt = (unsigned)((base > 0.5) ? (wire[i] * 10.0 / base) : 0.0); if (rt > 9999U) rt = 9999U;
+        snprintf(ln, sizeof ln, "%c%-6s%5lu %4lu %2u.%u", (pick == (int8_t)i) ? '>' : ' ', ft,
+                 (unsigned long)wire[i], (unsigned long)base, rt / 10U, rt % 10U);
+        UI_Text(4U, (uint16_t)(66U + i * 12U), 1U, (pick == (int8_t)i) ? UI_OK : UI_CYAN, UI_BG, ln);
+    }
+    { uint32_t t0 = HAL_GetTick();
+      while ((HAL_GetTick() - t0) < 7000U) { if (UI_Poll() != MENU_INPUT_NONE) break; } }
+
+    if (pick < 0) return 0U;                                       /* هیچ فرکانسی «سیم» رو از «هوا» جدا نکرد */
+    *bi = (uint8_t)pick; *ref = wire[pick]; *air = (airA[pick] > nzA[pick]) ? airA[pick] : nzA[pick]; s_wpK = kb[pick];
+    Probe_PwmStart(PROBE_2, k_wpF[pick], 50U); HAL_Delay(3);
+    return 1U;
+}
+
 static void wp_line(uint16_t y, uint16_t fg, const char *txt, char *cache)
 {
     if (strncmp(cache, txt, 31U) == 0) return;          /* فقط وقتی متن عوض شده دوباره بکش (بدون چشمک) */
@@ -2528,7 +2600,7 @@ static void App_WiringTest(void)
     LEDs_AllOff();
     Probe_AllOff();
     UI_Begin("WIRING TEST");
-    UI_Hint("OK calib L/R f U/D snd");
+    UI_Hint("OK cal L/R f U/D=SOUND");
 
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
@@ -2550,45 +2622,18 @@ static void App_WiringTest(void)
         if (in == MENU_INPUT_BACK) break;
         if (in == MENU_INPUT_LEFT  && fi > 0U)              { fi--; cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); shown = 2U; lastDraw = 0U - 1000U; }
         if (in == MENU_INPUT_RIGHT && fi + 1U < WP_F_COUNT) { fi++; cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); shown = 2U; lastDraw = 0U - 1000U; }
-        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN)   { snd = (uint8_t)!snd; lastDraw = 0U - 1000U; }
-        if (in == MENU_INPUT_SELECT)       /* کالیبراسیون روی همین فرکانس: اول P1 دور از سیم (هوا) ، بعد روی سیم */
+        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN)   { snd = (uint8_t)!snd; lastDraw = 0U - 1000U; snprintf(msg, sizeof msg, snd ? "SOUND ON" : "SOUND OFF"); msgUntil = HAL_GetTick() + 1500U; }
+        if (in == MENU_INPUT_SELECT)       /* کالیبراسیون خودکار: P1 اول روی سیم سالم ، بعد دور از سیم */
         {
-            wt_buzzer(0U);
-            LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
-            UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 AWAY from wire");
-            HAL_Delay(2000);
-            double airA = 0.0, airN = WP_NOISE_FLOOR;
-            for (uint8_t k = 0U; k < 12U; k++)                    /* هوا: بیشینه (بدترین حالت نشت مستقیم P2->P1) */
+            uint8_t bi = fi; double ref = 0.0, air = 0.0;
+            if (wp_autocal(&bi, &ref, &air))
             {
-                double a, n;
-                if (wp_capture(wp_f_actual(), &a, &n)) { if (a > airA) airA = a; if (n > airN) airN = n; }
-                HAL_Delay(5);
+                fi = bi; cal.valid = 1U; cal.ref = ref; cal.air = air; aEma = 0.0;
+                char t[12]; wp_fmt_f(t, sizeof t, k_wpF[fi]);
+                const double ratio = ref / ((air > 1.0) ? air : 1.0);
+                snprintf(msg, sizeof msg, "CAL %s x%u", t, (unsigned)ratio);
             }
-            wt_buzzer(1U); HAL_Delay(150); wt_buzzer(0U);
-            LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
-            UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 ON the wire..");
-            HAL_Delay(2500);
-            double wsum = 0.0; uint8_t wn = 0U;
-            for (uint8_t k = 0U; k < 16U; k++)                    /* سیم: میانگین */
-            {
-                double a, n;
-                if (wp_capture(wp_f_actual(), &a, &n)) { wsum += a; wn++; }
-                HAL_Delay(5);
-            }
-            const double wireA = wn ? wsum / (double)wn : 0.0;
-            const double base  = (airA > airN) ? airA : airN;
-            const double ratio = wireA / ((base > 1.0) ? base : 1.0);
-            char t[12]; wp_fmt_f(t, sizeof t, k_wpF[fi]);
-            if (wireA >= WP_AMP_MIN && ratio >= 1.6)
-            {
-                cal.valid = 1U; cal.ref = wireA; cal.air = base; aEma = 0.0;
-                snprintf(msg, sizeof msg, "OK %s x%u.%u", t, (unsigned)ratio, (unsigned)((ratio - (double)(unsigned)ratio) * 10.0));
-            }
-            else
-            {
-                cal.valid = 0U;
-                snprintf(msg, sizeof msg, "%s no diff x%u", t, (unsigned)ratio);
-            }
+            else { cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); snprintf(msg, sizeof msg, "no diff! redo"); }
             msgUntil = HAL_GetTick() + 3000U;
             shown = 2U; lastDraw = 0U - 1000U;
             c1[0] = c2[0] = c3[0] = c4[0] = '\0';
@@ -2600,7 +2645,13 @@ static void App_WiringTest(void)
         double aSig = 0.0, aNz = WP_NOISE_FLOOR;
         uint8_t got = wp_capture(wp_f_actual(), &aSig, &aNz);
         aEma = (aEma == 0.0) ? aSig : (0.6 * aEma + 0.4 * aSig);          /* هموارسازی: عدد ضعیف نپره */
-        const double thr = cal.valid ? (cal.air + 0.5 * (cal.ref - cal.air)) : 0.0;   /* وسط «هوا» و «سیم» */
+        double thr = 0.0;
+        if (cal.valid)
+        {
+            const double a0 = (cal.air > 1.0) ? cal.air : 1.0;
+            thr = wp_sqrt(a0 * cal.ref);                       /* میانگین هندسی «هوا» و «سیم» (تغییر فشار/فاصله ضربی‌ست) */
+            if (ok) thr *= 0.8;                                /* هیسترزیس: وقتی OK هست راحت‌تر OK می‌مونه */
+        }
         uint8_t good = cal.valid ? ((got && aEma >= thr) ? 1U : 0U)
                                  : ((got && aSig >= WP_AMP_MIN && aSig >= WP_SNR_MIN * aNz) ? 1U : 0U);
         if (good) lastGood = HAL_GetTick();
@@ -2627,7 +2678,21 @@ static void App_WiringTest(void)
         if (cal.valid) snprintf(line, sizeof line, "air %lu thr %luuV   ", (unsigned long)(cal.air * 50.35), (unsigned long)(thr * 50.35));
         else           snprintf(line, sizeof line, "nz %luuV x%u     ", (unsigned long)(aNz * 50.35), snr);
         wp_line(172U, UI_CYAN, line, c3);
+        {   /* نوار سطح سیگنال (لگاریتمی) با خط حد (نارنجی) : می‌بینی موقع کشیدن پروب سیگنال چقدر بالا/پایین می‌ره */
+            const double lo = (cal.valid && cal.air > 1.0) ? 0.5 * cal.air : 1.0;
+            const double hiV = cal.valid ? 2.0 * cal.ref : 200.0;
+            const double tv = cal.valid ? thr : WP_AMP_MIN;
+            double v = cal.valid ? aEma : aSig; if (v < lo) v = lo;
+            const float span = logf((float)(hiV / lo));
+            int w = (int)(200.0f * logf((float)(v / lo)) / span); if (w < 0) w = 0; if (w > 200) w = 200;
+            double tt = (tv > lo) ? tv : lo;
+            int tw = (int)(200.0f * logf((float)(tt / lo)) / span); if (tw < 0) tw = 0; if (tw > 198) tw = 198;
+            LCD_FillRect(10U, 113U, 200U, 8U, UI_DIM);
+            if (w > 0) LCD_FillRect(10U, 113U, (uint16_t)w, 8U, ok ? UI_OK : UI_BAD);
+            LCD_FillRect((uint16_t)(10 + tw), 111U, 2U, 12U, UI_ORANGE);
+        }
         if (HAL_GetTick() < msgUntil) snprintf(line, sizeof line, "%-15s", msg);
+        else if (!cal.valid)          snprintf(line, sizeof line, "OK=cal %s      ", snd ? "S:ON" : "S:OFF");
         else                          snprintf(line, sizeof line, "%s C%luM x%s     ", snd ? "S:ON" : "S:OFF", (unsigned long)((cpuHz + 500000U) / 1000000U), (s_wpK > 1.5) ? "2" : (s_wpK < 0.75) ? "0.5" : "1");
         wp_line(196U, UI_DIM, line, c4);
         if (!cpuDone) { cpuDone = 1U; cpuHz = Clock_MeasureCpuHz(); c4[0] = '\0'; }

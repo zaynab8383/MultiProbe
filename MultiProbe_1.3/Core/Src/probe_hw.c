@@ -524,7 +524,7 @@ static void ohm_gnd_off(void)
     gi.Pin       = GPIO_PIN_4;                     /* PE4 دوباره TIM15_CH1N */
     gi.Mode      = GPIO_MODE_AF_PP;
     gi.Pull      = GPIO_NOPULL;
-    gi.Speed     = GPIO_SPEED_FREQ_LOW;
+    gi.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
     gi.Alternate = GPIO_AF4_TIM15;
     HAL_GPIO_Init(GPIOE, &gi);
     s_ohmGnd = 0U;

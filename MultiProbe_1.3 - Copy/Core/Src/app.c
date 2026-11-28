@@ -1410,14 +1410,15 @@ static float sc_counts_to_vin(uint32_t c) { return Adc_PinToVinLinear((float)c *
  * پایین موج روی GND کلیپ می‌شه (کلمپ ورودی) ؛ هر جا نمونه ≈ ۰ بود حالت فیلتر ریست و خروجی ۰ در نظر گرفته می‌شه.
  * محدودیت: موج‌های سینوسی/مثلثی که به زیر ۰ می‌رن فقط تقریبی درست می‌شن (اطلاعات کلیپ‌شده برنمی‌گرده).
  * --------------------------------------------------------------------------------------------------- */
-#define SC_CMP_RHO0      1.10f        /* مقدار اولیه‌ی rho قبل از یادگیری */
-#define SC_CMP_TAU0      0.000071f      /* مقدار اولیه‌ی tb (ثانیه) */
+#define SC_CMP_RHO0      1.00f        /* قبل از کالیبراسیون: بدون جبران (r=1) */
+#define SC_CMP_TAU0      0.000071f    /* مقدار اولیه‌ی tb (ثانیه) = (R8||R6)·(C4+خازن اضافه) */
 #define SC_CMP_CLIP_V    0.15f        /* زیر این ولت (مقیاس ورودی) = کلیپ‌شده‌ی صفر */
 static float s_cmpRho = SC_CMP_RHO0;
 static float s_cmpTau = SC_CMP_TAU0;
+static uint8_t s_cmpCal = 0U, s_cmpCalOk = 0U, s_cmpCalLocked = 0U; static float s_cmpLr = 0.0f, s_cmpLt = 0.0f;      /* 1 = r,tb از کالیبراسیون روی مربع تست قفل شده */
 
 /* یادگیری rho/tb از سقف پالس‌ها ؛ خروجی 1 = چیزی یاد گرفته شد */
-static uint8_t sc_cmp_learn(const float *v, uint32_t n, float dt)
+__attribute__((unused)) static uint8_t sc_cmp_learn(const float *v, uint32_t n, float dt)
 {
     float mn = v[0], mx = v[0];
     for (uint32_t i = 1U; i < n; i++) { if (v[i] < mn) mn = v[i]; if (v[i] > mx) mx = v[i]; }
@@ -1487,23 +1488,39 @@ static uint8_t sc_cmp_learn(const float *v, uint32_t n, float dt)
     return 1U;
 }
 
-/* فیلتر معکوس + ریست روی کلیپ صفر */
+/* ---------------------------------------------------------------------------------------------------
+ * فیلتر معکوس دقیق (گسسته) برای هر r > 0 :
+ *     مدل ورودی:  H(s) = K·(r + (1-r)/(1 + s·tb))      ،  r = بهره‌ی HF / بهره‌ی DC = ta/tb
+ *       r < 1 : لبه‌ها گرد می‌شن (فیلتر پایین‌گذر ؛ مثلاً بعد از اضافه‌کردن خازن شنت)
+ *       r = 1 : ورودی تنظیم‌شده (بدون اعوجاج)
+ *       r > 1 : لبه جهش می‌کنه و سقف افت می‌کنه (جبران بیش‌ازحد)
+ *     x[i] = ( v[i] - (1-r)·α·z[i-1] ) / ( r + (1-r)(1-α) ) ،  z[i] = α·z[i-1] + (1-α)·x[i] ،  α = exp(-dt/tb)
+ *   برای هر dt و هر r>0 پایداره ؛ r کوچیک نویز HF رو تقویت می‌کنه (۱/r) پس r ≥ 0.12 محدود می‌شه.
+ *   روی نمونه‌ی ≈۰ (کلیپ ورودی/ADC) حالت فیلتر ریست می‌شه.
+ * --------------------------------------------------------------------------------------------------- */
+static void sc_inv(const float *in, float *out, uint32_t n, float dt, float r, float tb, float z0)
+{
+    const float al = expf(-dt / tb);
+    const float D  = r + (1.0f - r) * (1.0f - al);
+    const float c1 = (1.0f - r) * al;
+    float z = z0;
+    for (uint32_t i = 0U; i < n; i++)
+    {
+        const float v = in[i];
+        float x;
+        if (v <= SC_CMP_CLIP_V) { x = 0.0f; z = 0.0f; }
+        else { x = (v - c1 * z) / D; if (x < 0.0f) x = 0.0f; z = al * z + (1.0f - al) * x; }
+        out[i] = x;
+    }
+}
+
 static void sc_cmp_apply(const float *in, float *out, uint32_t n, float dt)
 {
-    if (s_cmpRho < 1.02f || dt <= 0.0f) { for (uint32_t i = 0U; i < n; i++) out[i] = in[i]; return; }
-    const float tb = s_cmpTau, ta = s_cmpRho * s_cmpTau;
-    const float a = dt / (ta + dt), b = tb / (ta + dt);
-    float y = (in[0] > SC_CMP_CLIP_V) ? in[0] : 0.0f, xp = in[0];
-    out[0] = y;
-    for (uint32_t i = 1U; i < n; i++)
-    {
-        const float x = in[i];
-        if (x <= SC_CMP_CLIP_V) { y = 0.0f; }
-        else { y = y + (x - y) * a + b * (x - xp); }
-        if (y < 0.0f) y = 0.0f;
-        xp = x;
-        out[i] = y;
-    }
+    float r = s_cmpRho;
+    if (r < 0.12f) r = 0.12f;
+    if (r > 30.0f) r = 30.0f;
+    if ((r > 0.98f && r < 1.02f) || dt <= 0.0f || s_cmpTau <= 0.0f) { for (uint32_t i = 0U; i < n; i++) out[i] = in[i]; return; }
+    sc_inv(in, out, n, dt, r, s_cmpTau, in[0]);
 }
 
 #define SC_MAXE   512U
@@ -1627,6 +1644,75 @@ static uint8_t sc_digital(const float *v, uint32_t n, float dt, float *out,
     return 1U;
 }
 
+/* ---------------------------------------------------------------------------------------------------
+ * کالیبراسیون ورودی روی موج مربعی ۱kHz ، ۵۰٪ (پروب ۲ -> پروب ۱) :
+ * (r , tb) رو طوری پیدا می‌کنه که بعد از فیلتر معکوس، «سقف و کف» پالس‌ها تا حد ممکن صاف بشن.
+ * فقط وقتی اجرا می‌شه که سیگنال واقعاً همون مربع تست باشه ؛ برای هر سیگنال دیگه‌ای پارامترها دست‌نخورده می‌مونن.
+ * v: ولت خام ، pos/dir/ne: لبه‌های همین v (از sc_digital) ؛ خروجی 1 = r,tb جدید توی *rOut, *tOut
+ * --------------------------------------------------------------------------------------------------- */
+/* هزینه‌ی «دو سطحی بودن» : هر نمونه به نزدیک‌ترین سطح (بالا/پایین) نسبت داده می‌شه و مجموع مربع فاصله‌ها حساب می‌شه.
+ * سقف/کف صاف و لبه‌ی تیز = هزینه‌ی کم ؛ جهش، افت، گردی لبه، و تقویت نویز = هزینه‌ی زیاد. */
+static float sc_cost2(const float *x, uint32_t n)
+{
+    float mn = x[0], mx = x[0];
+    for (uint32_t i = 1U; i < n; i++) { if (x[i] < mn) mn = x[i]; if (x[i] > mx) mx = x[i]; }
+    float lo = mn, hi = mx;
+    for (uint32_t it = 0U; it < 2U; it++)
+    {
+        const float mid = 0.5f * (lo + hi);
+        float sl = 0.0f, sh = 0.0f; uint32_t nl = 0U, nh = 0U;
+        for (uint32_t i = 0U; i < n; i++) { if (x[i] > mid) { sh += x[i]; nh++; } else { sl += x[i]; nl++; } }
+        if (nl == 0U || nh == 0U) return 1.0e30f;
+        lo = sl / (float)nl; hi = sh / (float)nh;
+    }
+    const float mid = 0.5f * (lo + hi);
+    float c = 0.0f;
+    for (uint32_t i = 0U; i < n; i++) { const float d = (x[i] > mid) ? (x[i] - hi) : (x[i] - lo); c += d * d; }
+    const float amp = hi - lo;                       /* نرمال به دامنه: فیلتری که فقط موج رو صاف/کوچیک کنه برنده نشه */
+    return (amp > 0.2f) ? (c / (amp * amp)) : 1.0e30f;
+}
+
+static uint8_t sc_cmp_calibrate(const float *v, uint32_t n, float dt, float *rOut, float *tOut)
+{
+    const uint32_t ne = s_scNe;
+    if (ne < 6U || dt <= 0.0f) return 0U;
+    uint32_t e0 = 0U; while (e0 < ne && s_scDir[e0] < 0) e0++;
+    if (e0 + 6U >= ne) return 0U;
+    if (s_scPos[e0] < 16.0f) return 0U;
+    const uint32_t w0 = (uint32_t)s_scPos[e0] - 8U, w1 = (uint32_t)s_scPos[e0 + 6U];     /* ۳ پریود */
+    if (w0 + 64U >= w1 || w1 > n) return 0U;
+    const uint32_t W = w1 - w0;
+    if (W > 2400U) return 0U;
+
+    static float tmp[2400];
+    float bestC = 1.0e30f, bestR = 1.0f, bestT = s_cmpTau;
+    float tbList[16]; { float t = 20.0e-6f; for (uint32_t i = 0U; i < 16U; i++) { tbList[i] = t; t *= 1.3f; } }
+
+    for (uint32_t pass = 0U; pass < 2U; pass++)
+    {
+        const uint32_t NR = (pass == 0U) ? 26U : 5U, NT = (pass == 0U) ? 16U : 5U;
+        const float r0 = bestR, t0 = bestT;
+        for (uint32_t ir = 0U; ir < NR; ir++)
+        {
+            float r = (pass == 0U) ? (0.12f * powf(1.2f, (float)ir)) : (r0 * powf(1.045f, (float)ir - 2.0f));
+            if (r < 0.12f) r = 0.12f;
+            for (uint32_t it = 0U; it < NT; it++)
+            {
+                const float tb = (pass == 0U) ? tbList[it] : (t0 * powf(1.065f, (float)it - 2.0f));
+                sc_inv(v + w0, tmp, W, dt, r, tb, v[w0]);
+                const float c = sc_cost2(tmp, W);
+                if (c < bestC) { bestC = c; bestR = r; bestT = tb; }
+            }
+        }
+    }
+    if (bestC > 1.0e29f) return 0U;
+    if (bestC / (float)W > 0.02f) return 0U;                     /* بعد از بهترین جبران هم «دو‌سطحی» نیست = مربع نیست (سینوس/نویز) : یاد نگیر */
+    const float cId = sc_cost2(v + w0, W);                       /* بدون جبران */
+    *tOut = bestT;
+    *rOut = (bestC > 0.7f * cId) ? 1.0f : bestR;                  /* اگه جبران قابل‌توجه بهتر نیست: r=1 */
+    return 1U;
+}
+
 static uint16_t s_scTop[LCD_WIDTH], s_scBot[LCD_WIDTH];
 
 /* فاز کسری 0..1 بدون libm */
@@ -1650,7 +1736,7 @@ static void App_Scope(void)
     uint32_t autoGapUs = VM_AUTO_DEF_US;
     uint32_t last = 0U - 1000U;
     uint8_t  autoFail = 0U;
-    s_cmpRho = SC_CMP_RHO0; s_cmpTau = SC_CMP_TAU0;   /* ورودی با خازن اضافه سخت‌افزاری درست شده: جبران یادگرفته‌شده‌ی قدیمی رو دور بریز */
+    s_cmpRho = SC_CMP_RHO0; s_cmpTau = SC_CMP_TAU0; s_cmpCal = 0U; s_cmpCalOk = 0U; s_cmpCalLocked = 0U; s_cmpLr = 0.0f; s_cmpLt = 0.0f;   /* هر بار ورود به اسکوپ دوباره کالیبره می‌شه */
     uint8_t  srcI = 0U;       /* پیش‌فرض: PB0 با جبران نرم‌افزاری RC برای C4=780pF */
     uint8_t  src = 0U, nc = 1U;
     if (s_cpuRealHz == 0U)
@@ -1699,9 +1785,38 @@ static void App_Scope(void)
         }
         else
         {
-            static uint8_t learnN = 0U;
-            if (learnN == 0U) { (void)sc_cmp_learn(s_scV, SC_N, dt); learnN = 5U; }   /* یادگیری هر ۶ فریم: سریع‌تر و پایدارتر */
-            else learnN--;
+            /* کالیبراسیون یک‌بار‌مصرف: وقتی ورودی همون مربع تست (۱kHz ، ۵۰٪ ، ~۳.۳V) باشه ، ۳ بار موفق -> r,tb قفل می‌شن */
+                        if (!s_cmpCalLocked)
+            {
+                float hz0, du0, lo0, hi0, r00; uint32_t f0;
+                if (sc_digital(s_scV + SC_WARM, SC_N - SC_WARM, dt, s_scR, &hz0, &du0, &lo0, &hi0, &f0, &r00))
+                {
+                    /* گیت: لبه‌های بالارونده‌ی تقریباً هم‌فاصله + دامنه‌ی کافی ؛ (کیفیت دو‌سطحی‌بودن بعد از جبران داخل sc_cmp_calibrate چک می‌شه) */
+                    float pr[8]; uint32_t np = 0U;
+                    for (uint32_t m = 0U; m < s_scNe && np < 8U; m++) if (s_scDir[m] > 0) pr[np++] = s_scPos[m];
+                    uint8_t reg = (np >= 4U) ? 1U : 0U;
+                    if (reg)
+                    {
+                        const float p0 = pr[1] - pr[0];
+                        for (uint32_t m = 2U; m < np; m++) { const float q = pr[m] - pr[m - 1U]; if (q < 0.95f * p0 || q > 1.05f * p0) reg = 0U; }
+                    }
+                    if (reg && (hi0 - lo0) > 1.5f && hz0 > 100.0f && hz0 < 20000.0f)
+                    {
+                        float rr, tt;
+                        if (sc_cmp_calibrate(s_scV + SC_WARM, SC_N - SC_WARM, dt, &rr, &tt))
+                        {
+                            const float lr = logf(rr), lt = logf(tt);
+                            if (s_cmpCalOk > 0U && (fabsf(lr - s_cmpLr / (float)s_cmpCalOk) > 0.5f || fabsf(lt - s_cmpLt / (float)s_cmpCalOk) > 0.5f))
+                            { s_cmpCalOk = 0U; s_cmpLr = 0.0f; s_cmpLt = 0.0f; }      /* نتیجه‌ها با هم نمی‌خونن: از اول */
+                            s_cmpLr += lr; s_cmpLt += lt;
+                            if (++s_cmpCalOk >= 3U)
+                            {
+                                s_cmpRho = expf(s_cmpLr / 3.0f); s_cmpTau = expf(s_cmpLt / 3.0f); s_cmpCalLocked = 1U; s_cmpCal = 1U;
+                            }
+                        }
+                    }
+                }
+            }
             sc_cmp_apply(s_scV, s_scC, SC_N, dt);
         }
         float cLo = 1.0e9f, cHi = -1.0e9f;
@@ -2024,7 +2139,7 @@ static void App_Scope(void)
         else     { snprintf(t2, sizeof t2, "--"); snprintf(t3, sizeof t3, "--"); }
         snprintf(b, sizeof b, "H%sV %skHz D%s%%   ", t1, t2, t3);
         UI_Text(2U, 206U, 1U, UI_DIM, UI_BG, b);
-        snprintf(b, sizeof b, "TB:%s Z:x%u %s %s%s k%u C%lu ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", (src == 2U) ? "P2/PA6" : src ? "PC4" : "PB0", nc ? "-RAW" : "", nc ? 0U : (unsigned)(s_cmpRho + 0.5f), (unsigned long)((cpu_hz() + 500000U) / 1000000U));
+        snprintf(b, sizeof b, "TB:%s Z:x%u %s %s%s r%u%s C%lu ", (tb == 0U) ? "AUTO" : "man", (unsigned)k_zm[zi], fold ? "LOCK" : "RAW", (src == 2U) ? "P2/PA6" : src ? "PC4" : "PB0", nc ? "-RAW" : "", nc ? 100U : (unsigned)(s_cmpRho * 100.0f + 0.5f), s_cmpCal ? "*" : "", (unsigned long)((cpu_hz() + 500000U) / 1000000U));
         UI_Text(2U, 218U, 1U, UI_DIM, UI_BG, b);
         LED_Blue_Set(sig);
     }
@@ -2395,6 +2510,78 @@ __attribute__((unused)) static uint8_t wp_sweep(uint8_t *bestFi, double *refAmp)
     return 0U;
 }
 
+/* کالیبراسیون خودکار (کلید OK) : روی هر فرکانس هم «روی سیم سالم» و هم «دور از سیم (هوا)» رو اندازه می‌گیره
+ * و فرکانسی رو انتخاب می‌کنه که بیشترین نسبت (سیم/هوا) رو می‌ده. ترتیب: اول روی سیم (تا ضریب واقعی فرکانس هم پیدا بشه) ، بعد هوا.
+ * خروجی: *bi = فرکانس انتخاب‌شده ، *ref = دامنه روی سیم ، *air = دامنه‌ی هوا ، s_wpK = ضریب فرکانس ؛ 1 = موفق */
+static void wp_fmt_f(char *dst, size_t n, uint32_t f);
+static uint8_t wp_autocal(uint8_t *bi, double *ref, double *air)
+{
+    static const double k_kk[3] = { 1.0, 0.5, 2.0 };
+    double wire[WP_F_COUNT], airA[WP_F_COUNT], nzA[WP_F_COUNT], kb[WP_F_COUNT];
+    wt_buzzer(0U);
+    LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
+    UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 ON the wire..");
+    HAL_Delay(2000);
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)                    /* ۱) روی سیم */
+    {
+        wire[i] = 0.0; nzA[i] = WP_NOISE_FLOOR; kb[i] = 1.0; s_wpK = 1.0;
+        Probe_PwmStart(PROBE_2, k_wpF[i], 50U); HAL_Delay(3);
+        const double f0 = wp_f_actual();
+        for (uint8_t k = 0U; k < 3U; k++)
+        {
+            double sum = 0.0, nzm = WP_NOISE_FLOOR; uint8_t cnt = 0U;
+            for (uint8_t r = 0U; r < 6U; r++) { double a, n; if (wp_capture(f0 * k_kk[k], &a, &n)) { sum += a; if (n > nzm) nzm = n; cnt++; } }
+            const double am = cnt ? sum / (double)cnt : 0.0;
+            if (am > wire[i]) { wire[i] = am; kb[i] = k_kk[k]; nzA[i] = nzm; }
+        }
+    }
+    wt_buzzer(1U); HAL_Delay(150); wt_buzzer(0U);
+    LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
+    UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 AWAY from wire");
+    HAL_Delay(2000);
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)                    /* ۲) هوا (با همون ضریبِ پیداشده) */
+    {
+        airA[i] = 0.0; s_wpK = kb[i];
+        Probe_PwmStart(PROBE_2, k_wpF[i], 50U); HAL_Delay(3);
+        const double f0 = wp_f_actual();
+        for (uint8_t r = 0U; r < 10U; r++)                          /* بیشینه: بدترین حالت نشت مستقیم P2->P1 */
+        { double a, n; if (wp_capture(f0, &a, &n)) { if (a > airA[i]) airA[i] = a; if (n > nzA[i]) nzA[i] = n; } }
+    }
+    double best = -1.0, sc[WP_F_COUNT];
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+    {
+        const double base = (airA[i] > nzA[i]) ? airA[i] : nzA[i];
+        sc[i] = (wire[i] >= 1.0) ? wire[i] / base : 0.0;          /* سیگنال ضعیف عایق هم قبول (قبلاً ≥5 شمارش لازم بود) */
+        if (sc[i] > best) best = sc[i];
+    }
+    s_wpK = 1.0;
+    int8_t pick = -1;                                              /* بین فرکانس‌هایی که ≥70٪ بهترین‌ان ، کمترین (کم‌حساس به کابل) */
+    if (best >= 1.6)
+        for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+            if (sc[i] >= 0.7 * best) { pick = (int8_t)i; break; }
+
+    /* جدول نتیجه: برای هر فرکانس «سیم / هوا / نسبت» ؛ ۷ ثانیه یا تا زدن یک کلید */
+    LCD_FillRect(0U, 52U, LCD_WIDTH, (uint16_t)(LCD_HEIGHT - 52U - 14U), UI_BG);
+    UI_Text(4U, 52U, 1U, UI_ORANGE, UI_BG, "freq  wire  air  ratio");
+    for (uint8_t i = 0U; i < WP_F_COUNT; i++)
+    {
+        char ft[12], ln[40];
+        wp_fmt_f(ft, sizeof ft, k_wpF[i]);
+        const double base = (airA[i] > nzA[i]) ? airA[i] : nzA[i];
+        unsigned rt = (unsigned)((base > 0.5) ? (wire[i] * 10.0 / base) : 0.0); if (rt > 9999U) rt = 9999U;
+        snprintf(ln, sizeof ln, "%c%-6s%5lu %4lu %2u.%u", (pick == (int8_t)i) ? '>' : ' ', ft,
+                 (unsigned long)wire[i], (unsigned long)base, rt / 10U, rt % 10U);
+        UI_Text(4U, (uint16_t)(66U + i * 12U), 1U, (pick == (int8_t)i) ? UI_OK : UI_CYAN, UI_BG, ln);
+    }
+    { uint32_t t0 = HAL_GetTick();
+      while ((HAL_GetTick() - t0) < 7000U) { if (UI_Poll() != MENU_INPUT_NONE) break; } }
+
+    if (pick < 0) return 0U;                                       /* هیچ فرکانسی «سیم» رو از «هوا» جدا نکرد */
+    *bi = (uint8_t)pick; *ref = wire[pick]; *air = (airA[pick] > nzA[pick]) ? airA[pick] : nzA[pick]; s_wpK = kb[pick];
+    Probe_PwmStart(PROBE_2, k_wpF[pick], 50U); HAL_Delay(3);
+    return 1U;
+}
+
 static void wp_line(uint16_t y, uint16_t fg, const char *txt, char *cache)
 {
     if (strncmp(cache, txt, 31U) == 0) return;          /* فقط وقتی متن عوض شده دوباره بکش (بدون چشمک) */
@@ -2413,7 +2600,7 @@ static void App_WiringTest(void)
     LEDs_AllOff();
     Probe_AllOff();
     UI_Begin("WIRING TEST");
-    UI_Hint("OK calib L/R f U/D snd");
+    UI_Hint("OK cal L/R f U/D=SOUND");
 
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
@@ -2435,45 +2622,18 @@ static void App_WiringTest(void)
         if (in == MENU_INPUT_BACK) break;
         if (in == MENU_INPUT_LEFT  && fi > 0U)              { fi--; cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); shown = 2U; lastDraw = 0U - 1000U; }
         if (in == MENU_INPUT_RIGHT && fi + 1U < WP_F_COUNT) { fi++; cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); shown = 2U; lastDraw = 0U - 1000U; }
-        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN)   { snd = (uint8_t)!snd; lastDraw = 0U - 1000U; }
-        if (in == MENU_INPUT_SELECT)       /* کالیبراسیون روی همین فرکانس: اول P1 دور از سیم (هوا) ، بعد روی سیم */
+        if (in == MENU_INPUT_UP || in == MENU_INPUT_DOWN)   { snd = (uint8_t)!snd; lastDraw = 0U - 1000U; snprintf(msg, sizeof msg, snd ? "SOUND ON" : "SOUND OFF"); msgUntil = HAL_GetTick() + 1500U; }
+        if (in == MENU_INPUT_SELECT)       /* کالیبراسیون خودکار: P1 اول روی سیم سالم ، بعد دور از سیم */
         {
-            wt_buzzer(0U);
-            LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
-            UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 AWAY from wire");
-            HAL_Delay(2000);
-            double airA = 0.0, airN = WP_NOISE_FLOOR;
-            for (uint8_t k = 0U; k < 12U; k++)                    /* هوا: بیشینه (بدترین حالت نشت مستقیم P2->P1) */
+            uint8_t bi = fi; double ref = 0.0, air = 0.0;
+            if (wp_autocal(&bi, &ref, &air))
             {
-                double a, n;
-                if (wp_capture(wp_f_actual(), &a, &n)) { if (a > airA) airA = a; if (n > airN) airN = n; }
-                HAL_Delay(5);
+                fi = bi; cal.valid = 1U; cal.ref = ref; cal.air = air; aEma = 0.0;
+                char t[12]; wp_fmt_f(t, sizeof t, k_wpF[fi]);
+                const double ratio = ref / ((air > 1.0) ? air : 1.0);
+                snprintf(msg, sizeof msg, "CAL %s x%u", t, (unsigned)ratio);
             }
-            wt_buzzer(1U); HAL_Delay(150); wt_buzzer(0U);
-            LCD_FillRect(0U, 52U, LCD_WIDTH, 60U, UI_BG);
-            UI_Text(10U, 64U, 2U, UI_ORANGE, UI_BG, "P1 ON the wire..");
-            HAL_Delay(2500);
-            double wsum = 0.0; uint8_t wn = 0U;
-            for (uint8_t k = 0U; k < 16U; k++)                    /* سیم: میانگین */
-            {
-                double a, n;
-                if (wp_capture(wp_f_actual(), &a, &n)) { wsum += a; wn++; }
-                HAL_Delay(5);
-            }
-            const double wireA = wn ? wsum / (double)wn : 0.0;
-            const double base  = (airA > airN) ? airA : airN;
-            const double ratio = wireA / ((base > 1.0) ? base : 1.0);
-            char t[12]; wp_fmt_f(t, sizeof t, k_wpF[fi]);
-            if (wireA >= WP_AMP_MIN && ratio >= 1.6)
-            {
-                cal.valid = 1U; cal.ref = wireA; cal.air = base; aEma = 0.0;
-                snprintf(msg, sizeof msg, "OK %s x%u.%u", t, (unsigned)ratio, (unsigned)((ratio - (double)(unsigned)ratio) * 10.0));
-            }
-            else
-            {
-                cal.valid = 0U;
-                snprintf(msg, sizeof msg, "%s no diff x%u", t, (unsigned)ratio);
-            }
+            else { cal.valid = 0U; Probe_PwmStart(PROBE_2, k_wpF[fi], 50U); HAL_Delay(3); snprintf(msg, sizeof msg, "no diff! redo"); }
             msgUntil = HAL_GetTick() + 3000U;
             shown = 2U; lastDraw = 0U - 1000U;
             c1[0] = c2[0] = c3[0] = c4[0] = '\0';
@@ -2485,7 +2645,13 @@ static void App_WiringTest(void)
         double aSig = 0.0, aNz = WP_NOISE_FLOOR;
         uint8_t got = wp_capture(wp_f_actual(), &aSig, &aNz);
         aEma = (aEma == 0.0) ? aSig : (0.6 * aEma + 0.4 * aSig);          /* هموارسازی: عدد ضعیف نپره */
-        const double thr = cal.valid ? (cal.air + 0.5 * (cal.ref - cal.air)) : 0.0;   /* وسط «هوا» و «سیم» */
+        double thr = 0.0;
+        if (cal.valid)
+        {
+            const double a0 = (cal.air > 1.0) ? cal.air : 1.0;
+            thr = wp_sqrt(a0 * cal.ref);                       /* میانگین هندسی «هوا» و «سیم» (تغییر فشار/فاصله ضربی‌ست) */
+            if (ok) thr *= 0.8;                                /* هیسترزیس: وقتی OK هست راحت‌تر OK می‌مونه */
+        }
         uint8_t good = cal.valid ? ((got && aEma >= thr) ? 1U : 0U)
                                  : ((got && aSig >= WP_AMP_MIN && aSig >= WP_SNR_MIN * aNz) ? 1U : 0U);
         if (good) lastGood = HAL_GetTick();
@@ -2512,7 +2678,21 @@ static void App_WiringTest(void)
         if (cal.valid) snprintf(line, sizeof line, "air %lu thr %luuV   ", (unsigned long)(cal.air * 50.35), (unsigned long)(thr * 50.35));
         else           snprintf(line, sizeof line, "nz %luuV x%u     ", (unsigned long)(aNz * 50.35), snr);
         wp_line(172U, UI_CYAN, line, c3);
+        {   /* نوار سطح سیگنال (لگاریتمی) با خط حد (نارنجی) : می‌بینی موقع کشیدن پروب سیگنال چقدر بالا/پایین می‌ره */
+            const double lo = (cal.valid && cal.air > 1.0) ? 0.5 * cal.air : 1.0;
+            const double hiV = cal.valid ? 2.0 * cal.ref : 200.0;
+            const double tv = cal.valid ? thr : WP_AMP_MIN;
+            double v = cal.valid ? aEma : aSig; if (v < lo) v = lo;
+            const float span = logf((float)(hiV / lo));
+            int w = (int)(200.0f * logf((float)(v / lo)) / span); if (w < 0) w = 0; if (w > 200) w = 200;
+            double tt = (tv > lo) ? tv : lo;
+            int tw = (int)(200.0f * logf((float)(tt / lo)) / span); if (tw < 0) tw = 0; if (tw > 198) tw = 198;
+            LCD_FillRect(10U, 113U, 200U, 8U, UI_DIM);
+            if (w > 0) LCD_FillRect(10U, 113U, (uint16_t)w, 8U, ok ? UI_OK : UI_BAD);
+            LCD_FillRect((uint16_t)(10 + tw), 111U, 2U, 12U, UI_ORANGE);
+        }
         if (HAL_GetTick() < msgUntil) snprintf(line, sizeof line, "%-15s", msg);
+        else if (!cal.valid)          snprintf(line, sizeof line, "OK=cal %s      ", snd ? "S:ON" : "S:OFF");
         else                          snprintf(line, sizeof line, "%s C%luM x%s     ", snd ? "S:ON" : "S:OFF", (unsigned long)((cpuHz + 500000U) / 1000000U), (s_wpK > 1.5) ? "2" : (s_wpK < 0.75) ? "0.5" : "1");
         wp_line(196U, UI_DIM, line, c4);
         if (!cpuDone) { cpuDone = 1U; cpuHz = Clock_MeasureCpuHz(); c4[0] = '\0'; }
